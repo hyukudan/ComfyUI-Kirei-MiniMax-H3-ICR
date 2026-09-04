@@ -15,7 +15,7 @@ Each H3 model evaluation is replaced by two levels:
 1. **One global low-resolution branch** at the H3 Base latent geometry.
 2. **Several overlapping high-resolution spatial tiles** at the final geometry.
 
-Text, native H3 references and audio stay global in every call. Only the target video latent is spatially tiled.
+Text, native H3 references and audio stay global in every call. Only the target video latent and target-grid visual keyframes are spatially transformed.
 
 The global branch produces a model-output prior. The HR tile predictions are accumulated with overlap weights and fused with that prior in model-output space at the same diffusion coordinate:
 
@@ -33,14 +33,17 @@ This is deliberately done for every H3 model evaluation. It is not a final RGB s
 
 ## Global MM-RoPE coordinates
 
-A naïve tile call is invalid for H3 because native `PackedLayout` derives spatial MM-RoPE coordinates from the local target shape. The tile would therefore behave as if it occupied the complete canvas.
+A naive tile call is invalid for H3 because native `PackedLayout` derives spatial MM-RoPE coordinates from the local target shape. The tile would therefore behave as if it occupied the complete canvas.
 
-M4-v0 builds a normal tile layout for row topology, then replaces the target-video `position_ids` with the exact rows selected from the full-canvas H3 layout. Non-video positions are copied from the full layout. As a result:
+M4 builds a normal tile layout for row topology, then replaces the target-video `position_ids` with the exact rows selected from the full-canvas H3 layout. Non-spatial rows are copied from the full layout. Visual keyframe condition rows are handled in the same way.
+
+As a result:
 
 - a tile keeps the original full-canvas spatial coordinates;
+- visual keyframe rows keep their original full-canvas coordinates;
 - text and reference positions are unchanged;
 - target audio retains the full-canvas position convention;
-- the local target video rows remain shape-compatible with H3 patchification.
+- local target-video and keyframe rows remain shape-compatible with H3 patchification.
 
 If this mapping cannot be established exactly, the renderer fails closed.
 
@@ -54,11 +57,33 @@ Overlap weights use raised-cosine ramps only on tile edges that have neighbors. 
 
 ## Global prior
 
-M4-v0 computes the global branch by area-downsampling the current HR noisy video state to the clean H3 Base latent geometry and evaluating H3 once at that lower resolution. The resulting video model output is bilinearly lifted to the full target geometry and used as the weighted least-squares regularizer.
+M4 computes the global branch by area-downsampling the current HR noisy video state to the clean H3 Base latent geometry and evaluating H3 once at that lower resolution. The resulting video model output is bilinearly lifted to the full target geometry and used as the weighted least-squares regularizer.
 
 This is a global dynamic prior, not yet a replay of the exact pass-1 H3 trajectory. A future mode can consume captured pass-1 trajectory states when they are available and proven beneficial.
 
 The global branch also supplies the returned audio model output. Tile audio outputs are deliberately ignored, because every tile sees the same global audio stream and audio must not be spatially fused.
+
+## HR keyframes
+
+Native target-grid `minimax_keyframes` are supported when their visual latent is encoded at the full target geometry before M4 is applied.
+
+The renderer first validates that each visual keyframe has the same full H/W latent geometry as the target. It then transforms the payload per branch:
+
+### Global LR branch
+
+- visual keyframe latents are area-resized to the global prior geometry;
+- keyframe audio latents remain unchanged and global;
+- `cond_video_latents` and `cond_audio_latents` are rebuilt so H3's packed condition rows match the transformed keyframes and original refs;
+- a native low-resolution `PackedLayout` is built for the prior call.
+
+### HR tile branches
+
+- each visual keyframe latent is cropped to exactly the same spatial tile as the target video;
+- keyframe audio remains unchanged and global;
+- condition-latent lists are rebuilt for the tile payload;
+- every `cond` segment receives the exact full-canvas MM-RoPE rows corresponding to that tile region and keyframe latent time span.
+
+This creates a clean path for future sparse HR anchor experiments: detail can be injected through native H3 keyframes without making each tile interpret the keyframe as a separate local canvas.
 
 ## Spectrum interaction
 
@@ -72,18 +97,18 @@ When Spectrum H3 metadata is present:
 
 This makes the initial compatibility scope explicit: **Spectrum may accelerate the stable global prior branch, while tile calls stay actual**. This still requires real H3 validation before being treated as a supported production combination.
 
-## Explicit M4-v0 limits
+## Explicit M4 limits
 
 The renderer currently fails closed for:
 
-- target-grid `minimax_keyframes`;
 - EasyCache;
 - non-native MiniMax H3 model implementations;
 - batch sizes other than one;
+- target-grid visual keyframes whose latent geometry does not exactly match the full target before tiling;
 - geometry that is not aligned to the H3 patch grid;
 - plans that exceed `max_tiles`.
 
-`minimax_refs` remain supported because their packed row sizes do not depend on the target tile geometry. HR keyframes need a separate crop + global-position remapping implementation before they can be enabled safely.
+`minimax_refs` remain global and supported because their packed row sizes do not depend on the target tile geometry.
 
 ## Initial 2K laboratory preset
 
@@ -108,6 +133,7 @@ The renderer records:
 - tile model calls;
 - Spectrum-prior calls;
 - last/max tile count;
+- last visual keyframe count;
 - final target latent geometry;
 - full target video-token count;
 - per-tile video-token count.
@@ -125,10 +151,11 @@ Do not merge M4 into the default path solely because it runs or reduces peak mem
 5. faces, hands and text crossing tile boundaries;
 6. temporal stability;
 7. detail gain;
-8. VRAM and wall time.
+8. HR-keyframe propagation quality and hallucination risk;
+9. VRAM and wall time.
 
 A sharper result that changes the Base draft loses.
 
 ## Research lineage
 
-The high-level prior-regularized tiled-denoising direction is inspired by **FrescoDiffusion: 4K Image-to-Video with Prior-Regularized Tiled Diffusion** (Caselles-Dupré et al., 2026). Kirei H3-ICR does not copy its Wan-specific implementation or claim algorithmic identity. The implementation here is derived independently around public MiniMax H3 AV packing, flow coordinates and MM-RoPE behavior.
+The high-level prior-regularized tiled-denoising direction is inspired by **FrescoDiffusion: 4K Image-to-Video with Prior-Regularized Tiled Diffusion** (Caselles-Dupre et al., 2026). Kirei H3-ICR does not copy its Wan-specific implementation or claim algorithmic identity. The implementation here is derived independently around public MiniMax H3 AV packing, flow coordinates and MM-RoPE behavior.

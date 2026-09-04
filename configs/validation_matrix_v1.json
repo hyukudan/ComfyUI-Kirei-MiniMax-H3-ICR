@@ -1,0 +1,109 @@
+{
+  "schema": "h3_icr_validation_matrix/v1",
+  "principle": "Change one declared treatment at a time. Cross-resolution media baselines are not strict A/B comparisons.",
+  "gates": [
+    {
+      "id": "G1-backend-strict-ab",
+      "mode": "strict_ab",
+      "target": "same geometry",
+      "arms": ["fl2va_reference", "hybrid_late_adaln", "ref2va_reference"],
+      "allowed_differences": ["arm.backend"],
+      "locks": [
+        "base_latent",
+        "positive_conditioning",
+        "negative_conditioning",
+        "sigmas",
+        "noise",
+        "sampler",
+        "target_geometry",
+        "initializer/upscaler checkpoint",
+        "references/keyframes/audio order"
+      ]
+    },
+    {
+      "id": "G2-m3-constraint-strict-ab",
+      "mode": "strict_ab",
+      "backend": "winner from G1",
+      "arms": ["m3a_only", "m3a_plus_m3b", "m3a_plus_m3c", "m3a_plus_m3d"],
+      "allowed_differences": ["arm.features", "arm.settings.m3"],
+      "rule": "Do not combine M3b/M3c/M3d until each individual arm is characterized."
+    },
+    {
+      "id": "G3-m4-2k-internal-strict-ab",
+      "mode": "strict_ab",
+      "target": "2048x1152",
+      "arms": [
+        "constant_global_prior",
+        "sigma_scheduled_prior",
+        "sigma_scheduled_prior_plus_verified_hr_keyframes"
+      ],
+      "allowed_differences": [
+        "arm.features.renderer_m4.prior_schedule",
+        "arm.settings.m4.keyframes"
+      ],
+      "initial_preset": {
+        "tile": [1024, 768],
+        "overlap": [256, 256],
+        "prior_strength": 0.30,
+        "prior_schedule_floor": 0.15,
+        "prior_schedule_power": 1.0
+      }
+    },
+    {
+      "id": "G4-resolution-media-baseline",
+      "mode": "media_baseline_not_strict_ab",
+      "arms": ["best_dense_approx_1mp", "best_m4_2048x1152"],
+      "rule": "Base/source conditioning should be shared where possible, but target geometry/token topology differs by design. Do not report this as a strict A/B manifest match."
+    },
+    {
+      "id": "G5-m5-profiler-noop",
+      "mode": "strict_ab",
+      "arms": ["native_attention", "m5a_profiler_enabled"],
+      "allowed_differences": ["arm.settings.m5.profiler"],
+      "acceptance": "Decoded output must be identical or within the explicit numerical-equivalence tolerance chosen before the run."
+    },
+    {
+      "id": "G6-m5-sparse",
+      "mode": "strict_ab",
+      "arms": ["native_dense", "m5b_static_policy", "m5c_sigma_domain_policy"],
+      "allowed_differences": ["arm.features.sparse_m5", "arm.settings.m5"],
+      "metrics": [
+        "decoded-media parity",
+        "first-use wall time",
+        "steady-state wall time",
+        "peak VRAM",
+        "BlockMask sparsity",
+        "sparse-call fraction",
+        "topology fallback fraction",
+        "sigma-domain fallback fraction"
+      ]
+    },
+    {
+      "id": "G7-m6-zero-init",
+      "mode": "strict_ab",
+      "arms": ["adapter_off", "m6_zero_init_scaffold"],
+      "allowed_differences": ["arm.features.adapter_m6", "arm.settings.m6"],
+      "acceptance": "Exact output parity. The zero-init scaffold has no quality hypothesis."
+    },
+    {
+      "id": "G8-m6-trained",
+      "mode": "strict_ab_after_training",
+      "arms": ["validated_training_free_teacher", "trained_m6_adapter"],
+      "allowed_differences": ["arm.features.adapter_m6", "arm.settings.m6"],
+      "requires": [
+        "G1-G7 characterization complete",
+        "trained checkpoint SHA-256",
+        "architecture-binding metadata",
+        "ComfyUI additional-model offload lifecycle verified"
+      ]
+    }
+  ],
+  "decoded_media_priority": [
+    "Base geometry and motion fidelity",
+    "identity and object correctness",
+    "temporal consistency and disocclusion",
+    "faces, hands, text and product detail",
+    "perceptual detail",
+    "wall time and VRAM"
+  ]
+}

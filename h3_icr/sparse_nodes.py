@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from .sparse_attention import patch_flex_sparse_attention
+from .sparse_attention_v2 import patch_flex_sparse_attention_v2
 
 
 class H3ICRFlexSparseAttention:
@@ -32,9 +32,10 @@ class H3ICRFlexSparseAttention:
     FUNCTION = "patch"
     CATEGORY = "Kirei/MiniMax H3/ICR/Research"
     DESCRIPTION = (
-        "Experimental M5 real block-sparse backend using PyTorch FlexAttention BlockMask. "
-        "It requires an M5 policy whose architecture fingerprint matches the current native H3 model, "
-        "keeps cross-modal context global, and automatically returns to dense attention in the sigma tail."
+        "Experimental M5 v2 real block-sparse backend using PyTorch FlexAttention BlockMask. "
+        "It requires a current M5 v2 policy with matching H3 architecture and calibrated packed-layout "
+        "topology, keeps all cross-modal links global, reuses BlockMasks across sigmas, and returns to "
+        "dense attention in the configured sigma tail or whenever the runtime topology is outside calibration."
     )
 
     def patch(
@@ -52,7 +53,7 @@ class H3ICRFlexSparseAttention:
         force_flex_kernel,
         profile_json="",
     ):
-        patched, runtime = patch_flex_sparse_attention(
+        patched, runtime = patch_flex_sparse_attention_v2(
             model,
             policy_json=policy_json,
             profile_json=profile_json,
@@ -66,7 +67,7 @@ class H3ICRFlexSparseAttention:
             temporal_radius=temporal_radius,
             force_flex_kernel=force_flex_kernel,
         )
-        return patched, {"api": 1, "runtime": runtime}
+        return patched, {"api": 2, "runtime": runtime}
 
 
 class H3ICRFlexSparseReport:

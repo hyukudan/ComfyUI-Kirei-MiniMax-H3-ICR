@@ -201,7 +201,13 @@ class BaseVideoAdapterConfig:
 
 
 class StateAwareBaseVideoAdapter(nn.Module):
-    """Linear-cost local adapter over aligned Base and current H3 target rows."""
+    """Linear-cost local adapter over aligned Base and current H3 target rows.
+
+    The feature trunk is shared across selected H3 blocks, but every injection
+    block owns an independent zero-initialized residual head. This keeps the
+    static/dynamic representation compact while allowing layer-specific output
+    semantics during training.
+    """
 
     def __init__(
         self,
@@ -232,14 +238,18 @@ class StateAwareBaseVideoAdapter(nn.Module):
         )
         self.pointwise = nn.Conv3d(dim, dim, kernel_size=1)
         self.out_norm = nn.LayerNorm(dim)
-        self.out_proj = nn.Linear(dim, self.hidden_size)
-        nn.init.zeros_(self.out_proj.weight)
-        nn.init.zeros_(self.out_proj.bias)
+        self.out_proj = nn.ModuleDict(
+            {str(block): nn.Linear(dim, self.hidden_size) for block in config.injection_blocks}
+        )
+        for head in self.out_proj.values():
+            nn.init.zeros_(head.weight)
+            nn.init.zeros_(head.bias)
 
     def output_is_zero_initialized(self) -> bool:
-        return bool(
-            torch.count_nonzero(self.out_proj.weight.detach()).item() == 0
-            and torch.count_nonzero(self.out_proj.bias.detach()).item() == 0
+        return all(
+            torch.count_nonzero(head.weight.detach()).item() == 0
+            and torch.count_nonzero(head.bias.detach()).item() == 0
+            for head in self.out_proj.values()
         )
 
     def forward(
@@ -247,11 +257,15 @@ class StateAwareBaseVideoAdapter(nn.Module):
         dynamic_hidden: torch.Tensor,
         static_patch_rows: torch.Tensor,
         *,
+        block_index: int,
         latent_t: int,
         patch_grid_h: int,
         patch_grid_w: int,
         structure_gate: float,
     ) -> torch.Tensor:
+        block_key = str(int(block_index))
+        if block_key not in self.out_proj:
+            raise ValueError(f"adapter block {block_index} has no configured residual head")
         expected_rows = int(latent_t) * int(patch_grid_h) * int(patch_grid_w)
         if dynamic_hidden.ndim != 2 or dynamic_hidden.shape != (expected_rows, self.hidden_size):
             raise ValueError("adapter dynamic target-video rows do not match the active H3 patch grid")
@@ -266,7 +280,7 @@ class StateAwareBaseVideoAdapter(nn.Module):
         grid = fused.reshape(latent_t, patch_grid_h, patch_grid_w, -1).permute(3, 0, 1, 2).unsqueeze(0)
         local = grid + F.silu(self.pointwise(self.depthwise(grid)))
         rows = local.squeeze(0).permute(1, 2, 3, 0).reshape(expected_rows, -1)
-        return self.out_proj(self.out_norm(rows))
+        return self.out_proj[block_key](self.out_norm(rows))
 
 
 @dataclass(slots=True)
@@ -294,6 +308,7 @@ class BaseVideoAdapterProvider:
             "checkpoint_sha256": self.checkpoint_sha256,
             "note": self.note,
             "zero_output_projection": self.module.output_is_zero_initialized(),
+            "residual_head_mode": "per_injection_block",
         }
 
 
@@ -505,6 +520,7 @@ class BaseVideoAdapterRuntime:
         residual = self.provider.module(
             dynamic,
             static_rows,
+            block_index=block_index,
             latent_t=grid_t,
             patch_grid_h=grid_h,
             patch_grid_w=grid_w,
@@ -619,7 +635,7 @@ def create_zero_init_base_adapter_provider(
         architecture_digest=_digest(architecture),
         architecture=architecture,
         trained=False,
-        note="zero-init scaffold; output projection is zero and no trained adapter weights are loaded",
+        note="zero-init scaffold; per-block output heads are zero and no trained adapter weights are loaded",
     )
 
 

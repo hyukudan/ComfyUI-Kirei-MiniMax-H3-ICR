@@ -20,16 +20,57 @@ Text, native H3 references and audio stay global in every call. Only the target 
 The global branch produces a model-output prior. The HR tile predictions are accumulated with overlap weights and fused with that prior in model-output space at the same diffusion coordinate:
 
 ```text
-argmin_y  sum_i w_i || y - tile_i ||^2 + lambda || y - prior_hr ||^2
+argmin_y  sum_i w_i || y - tile_i ||^2 + lambda(sigma) || y - prior_hr ||^2
 ```
 
-For the current pointwise prior formulation, the closed-form update is:
+For the current pointwise formulation, the closed-form update is:
 
 ```text
-y = (sum_i w_i * tile_i + lambda * prior_hr) / (sum_i w_i + lambda)
+y = (sum_i w_i * tile_i + lambda(sigma) * prior_hr)
+    / (sum_i w_i + lambda(sigma))
 ```
 
 This is deliberately done for every H3 model evaluation. It is not a final RGB seam blend.
+
+## Sigma-aware global prior
+
+A constant global-prior coefficient is useful for preserving structure but risks suppressing late high-frequency synthesis. M4 therefore provides an optional outer prior-schedule patch.
+
+Let `prior_strength` be the maximum regularization coefficient configured on the tiled renderer. The schedule is:
+
+```text
+m(sigma) = floor + (1 - floor) * clamp(sigma / sigma_start, 0, 1)^power
+lambda(sigma) = prior_strength * m(sigma)
+```
+
+Recommended starting point:
+
+```text
+prior_strength: 0.30
+floor:          0.15
+power:          1.0
+```
+
+The schedule resolves `sigma_start` from the active sampler schedule when it is exposed in transformer options. If the schedule is unavailable, the first observed H3 video sigma becomes the reference for the run.
+
+This keeps the full global prior near the beginning of pass 2, where structure must remain tied to H3 Base, and progressively reduces it toward a small floor near sigma 0, where local tiles should have more freedom to synthesize microdetail.
+
+The schedule is deliberately a separate model patch so controlled media tests can compare:
+
+- no schedule / constant prior;
+- structure-first scheduled prior;
+- different floors and powers;
+
+without changing the tiled renderer itself.
+
+Recommended node order:
+
+```text
+MODEL
+  -> Kirei H3 ICR Tiled 2K Patch
+  -> Kirei H3 ICR Tiled Prior Schedule
+  -> Kirei H3 ICR Regenerate
+```
 
 ## Global MM-RoPE coordinates
 
@@ -55,7 +96,7 @@ The planner uses fixed-size tiles. When the final boundary would otherwise creat
 
 Overlap weights use raised-cosine ramps only on tile edges that have neighbors. This keeps the image boundary fully weighted and prevents uncovered positions.
 
-## Global prior
+## Global prior branch
 
 M4 computes the global branch by area-downsampling the current HR noisy video state to the clean H3 Base latent geometry and evaluating H3 once at that lower resolution. The resulting video model output is bilinearly lifted to the full target geometry and used as the weighted least-squares regularizer.
 
@@ -67,7 +108,7 @@ The global branch also supplies the returned audio model output. Tile audio outp
 
 Native target-grid `minimax_keyframes` are supported when their visual latent is encoded at the full target geometry before M4 is applied.
 
-The renderer first validates that each visual keyframe has the same full H/W latent geometry as the target. It then transforms the payload per branch:
+The renderer first validates that each visual keyframe has the same full H/W latent geometry as the target. It then transforms the payload per branch.
 
 ### Global LR branch
 
@@ -87,7 +128,7 @@ This creates a clean path for future sparse HR anchor experiments: detail can be
 
 ## Spectrum interaction
 
-The renderer installs itself as the outermost native H3 diffusion-model wrapper.
+The renderer installs itself as an outer native H3 diffusion-model wrapper. The optional prior-schedule patch is installed outside the tiled renderer and only changes the effective prior coefficient for the current evaluation.
 
 When Spectrum H3 metadata is present:
 
@@ -113,19 +154,21 @@ The renderer currently fails closed for:
 ## Initial 2K laboratory preset
 
 ```text
-target:             2048 x 1152
-tile:               1024 x 768
-requested overlap:  256 x 256
-prior geometry:     H3 Base latent geometry
-prior strength:     0.30
-max tiles:          16
+target:               2048 x 1152
+tile:                 1024 x 768
+requested overlap:    256 x 256
+prior geometry:       H3 Base latent geometry
+prior strength:       0.30
+prior schedule floor: 0.15
+prior schedule power: 1.0
+max tiles:             16
 ```
 
 For a 124-frame clip this normally means six HR tile evaluations plus one global LR evaluation per H3 model call. The exact tile count and actual overlap are reported at runtime.
 
 ## Telemetry
 
-The renderer records:
+The tiled renderer records:
 
 - total wrapper calls;
 - tiled versus dense-bypass calls;
@@ -138,7 +181,16 @@ The renderer records:
 - full target video-token count;
 - per-tile video-token count.
 
-Use `Kirei H3 ICR Tiled 2K Report` to inspect the live renderer statistics during M4 validation.
+The prior schedule separately records:
+
+- calls;
+- resolved `sigma_start`;
+- current sigma;
+- current schedule multiplier;
+- current effective prior strength;
+- minimum/maximum effective prior strength observed.
+
+Use `Kirei H3 ICR Tiled 2K Report` to inspect both renderer and prior-schedule state during M4 validation.
 
 ## Validation gate
 
@@ -152,7 +204,8 @@ Do not merge M4 into the default path solely because it runs or reduces peak mem
 6. temporal stability;
 7. detail gain;
 8. HR-keyframe propagation quality and hallucination risk;
-9. VRAM and wall time.
+9. constant-prior versus scheduled-prior behavior;
+10. VRAM and wall time.
 
 A sharper result that changes the Base draft loses.
 

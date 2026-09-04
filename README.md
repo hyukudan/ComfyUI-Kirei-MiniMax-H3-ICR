@@ -44,6 +44,20 @@ Under active development on `feature/tiled-2k-fusion` / PR #1:
 
 M4 is **not production-validated yet**. It will remain experimental until decoded H3 media tests show that it preserves the Base video's identities, objects, motion, timing and scene state.
 
+### M5 attention calibration path
+
+The first M5 layer is now implemented on the experimental branch:
+
+- non-destructive H3 `optimized_attention_override` instrumentation;
+- bounded Q/K sampling without constructing a full SxS matrix;
+- profiling by H3 layer, sigma bucket, attention head and branch;
+- modality accounting for text, visual conditions/references, audio conditions, target audio and target video;
+- target-video same-frame, spatial-local, temporal-local and 3D-local concentration estimates;
+- architecture and complete-profile SHA-256 fingerprints;
+- proposal-only head classification for later kernel experiments.
+
+**M5 does not enable sparse attention yet.** The profiler deliberately delegates to the original attention backend unchanged. A sparse policy will not be accepted until it uses real sparse kernels, validates its profile/checkpoint/layout fingerprint, has explicit dense fallback and late densification, and passes decoded-media parity tests.
+
 ## Core architecture
 
 ```text
@@ -85,6 +99,15 @@ H3 Base generation
                                                    |
                                                    v
                                              regenerated H3
+
+M5 research overlay:
+    active PackedLayout + sigma + branch
+                    |
+         normalized H3 Q/K samples
+                    |
+       per-head calibration profile
+                    |
+       proposal-only sparse policy
 ```
 
 ## Quality rule
@@ -177,17 +200,13 @@ prior_schedule_floor: 0.15
 prior_schedule_power: 1.0
 ```
 
-At the start of the second pass the renderer uses the full configured prior strength. Toward sigma 0, the regularizer approaches `prior_strength * floor`, leaving more freedom for H3 to synthesize microdetail while retaining a small global anchor.
-
-The schedule is a separate patch on purpose, so validation can compare constant-prior and scheduled-prior runs without changing the underlying tiled renderer.
-
 Recommended M4 node order:
 
 ```text
 MODEL
   -> Kirei H3 ICR Tiled 2K Patch
   -> Kirei H3 ICR Tiled Prior Schedule
-  -> Kirei H3 ICR Regenerate
+  -> H3 ICR Regenerate
 ```
 
 ### Global MM-RoPE coordinates
@@ -214,8 +233,6 @@ For each HR tile:
 - keyframe audio remains global;
 - keyframe condition rows use the corresponding full-canvas MM-RoPE coordinates.
 
-This prepares the renderer for sparse HR anchor experiments inspired by video-SR work such as SparkVSR, while keeping the H3-native conditioning contract.
-
 ### Initial 2K laboratory preset
 
 ```text
@@ -231,6 +248,38 @@ max tiles:             16
 
 For a typical 124-frame H3 clip, the full 2048x1152 target is about **85,248 target video tokens** before text, references and audio. A 1024x768 tile is about **28,416 target video tokens**. The initial plan normally uses six HR tiles plus one global LR call per H3 model evaluation.
 
+## M5 attention profiling and calibration
+
+M5 starts from the existing ComfyUI `optimized_attention_override` hook. The profiler samples normalized Q/K tensors and immediately delegates to the same underlying attention function, so the measurement path is intended to be output-neutral.
+
+Default light-profile settings:
+
+```text
+layer stride:              5
+query samples/modality:   24
+key samples/modality:     48
+sigma decimals:            3
+max calibration buckets: 2048
+```
+
+For a full calibration pass, `layer_stride=1` can be used after the light profile is shown stable.
+
+The report groups calls as:
+
+- `dense`;
+- `m4_global_prior`;
+- `m4_hr_tile`.
+
+For each sampled head it estimates cross-modal attention mass and target-video locality. A second JSON output converts measurements into **candidate** labels such as:
+
+- `local_3d_candidate`;
+- `spatial_window_candidate`;
+- `temporal_stripe_candidate`;
+- `global_or_cross_modal`;
+- `mixed_dense`.
+
+These labels do not change attention execution. See [`docs/M5_ATTENTION_CALIBRATION.md`](docs/M5_ATTENTION_CALIBRATION.md).
+
 ## Spectrum and cache compatibility
 
 ### Spectrum H3
@@ -241,7 +290,7 @@ Current M4 policy:
 - HR tile child calls remove `spectrum_h3_*` runtime fields and execute as actual H3 calls;
 - forecast history is never shared across different tile topologies.
 
-This is an intentionally conservative first interoperability mode and still requires decoded-media validation.
+The M5 profiler can measure real attention calls. A Spectrum-forecasted call that does not execute H3 attention naturally contributes no Q/K sample.
 
 ### EasyCache
 
@@ -260,10 +309,13 @@ EasyCache is currently rejected by M4. Tile-local cache semantics have not been 
 ### M4 experimental
 
 - **Kirei H3 ICR Tiled 2K Patch [Experimental]** — patches a native H3 `MODEL` with global-LR + tiled-HR model-output rendering.
-- **Kirei H3 ICR Tiled Prior Schedule [Experimental]** — decays the global prior regularization from structure-first to detail-friendly as sigma decreases.
+- **Kirei H3 ICR Tiled Prior Schedule [Experimental]** — decays global prior regularization from structure-first to detail-friendly as sigma decreases.
 - **Kirei H3 ICR Tiled 2K Report** — exposes live tile/prior/token/keyframe/prior-schedule telemetry.
 
-The tiled patch is applied first, the optional prior schedule second, and the resulting `MODEL` is then passed to **Kirei H3 ICR Regenerate**.
+### M5 research
+
+- **Kirei H3 ICR Attention Profiler [M5 Research]** — non-destructively samples Q/K by layer, sigma and modality.
+- **Kirei H3 ICR Attention Profile Report** — outputs the complete calibration profile and a proposal-only head classification.
 
 ## Companion integration
 
@@ -286,17 +338,9 @@ The first combined validation should compare:
 - multiple `prior_strength` values around `0.30`;
 - schedule floors around `0.10-0.25` and powers around `0.5-2.0`.
 
-Inspect the complete video for:
+M5 calibration should then collect profiles across the same backend/reference/aspect/duration matrix before any sparse kernel is enabled.
 
-- tile seams;
-- identity drift between tile regions;
-- incorrect hands/faces/text crossing tile boundaries;
-- local exposure or color discontinuity;
-- motion discontinuity;
-- hallucinated objects or changed actions;
-- temporal flicker;
-- actual detail gain;
-- VRAM and wall time.
+Inspect the complete video for tile seams, identity drift, boundary errors, exposure/color discontinuity, motion discontinuity, hallucinated events, temporal flicker, actual detail gain, VRAM and wall time.
 
 ## Tests
 
@@ -305,7 +349,7 @@ python -m pytest
 ruff check h3_icr tests
 ```
 
-GitHub Actions runs the unit suite and Ruff on every push and pull request. The model-independent tests do not require a ComfyUI installation; actual H3 media validation requires a current ComfyUI MiniMax H3 runtime and the target model checkpoints.
+GitHub Actions runs the unit suite and Ruff on every push and pull request. Model-independent tests do not require a ComfyUI installation; actual H3 media validation requires a current ComfyUI MiniMax H3 runtime and the target model checkpoints.
 
 ## Documentation
 
@@ -315,6 +359,7 @@ GitHub Actions runs the unit suite and Ruff on every push and pull request. The 
 - [`docs/RESEARCH.md`](docs/RESEARCH.md) — research map.
 - [`docs/RESEARCH_SURVEY_v1_2.md`](docs/RESEARCH_SURVEY_v1_2.md) — literature and public-implementation survey.
 - [`docs/M4_TILED_2K_RENDERER.md`](docs/M4_TILED_2K_RENDERER.md) — M4 tiled renderer design and validation gate.
+- [`docs/M5_ATTENTION_CALIBRATION.md`](docs/M5_ATTENTION_CALIBRATION.md) — M5 profiling and calibration design.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — staged roadmap.
 
 ## Roadmap
@@ -323,9 +368,9 @@ Current order:
 
 1. validate Base H3-ICR backend matrix on decoded media;
 2. validate M4 global-LR + tiled-HR 2K rendering, sigma-aware prior scheduling and HR keyframes;
-3. add measurement-consistency / posterior-consistency experiments;
-4. profile dense H3 attention by layer, head, timestep and modality;
-5. add calibrated real sparse kernels with explicit fallback;
+3. collect real M5 attention profiles across backends, references, aspects and durations;
+4. add measurement-consistency / posterior-consistency experiments;
+5. implement calibrated **real sparse kernels** with fingerprint validation, dense fallback and late densification;
 6. train the state-aware BaseVideo Adapter + detail LoRA only after the training-free teacher is characterized;
 7. distill the validated teacher to fewer steps later.
 

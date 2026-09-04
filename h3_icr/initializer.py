@@ -31,7 +31,7 @@ def validate_provider(provider: Any) -> None:
     method = getattr(provider, "upscale_clean_video", None)
     if api != H3_LATENT_UPSCALER_API or kind != H3_LATENT_UPSCALER_KIND or not callable(method):
         raise TypeError(
-            "learned_3d requires H3_LATENT_UPSCALER API v1 from the companion MiniMax H3 latent upscaler"
+            "learned_3d requires an H3_LATENT_UPSCALER API-v1 provider; use the native Kirei provider"
         )
 
 
@@ -76,4 +76,8 @@ def upscale_and_align_clean(
         "audio_shape": list(audio.shape),
         "fidelity": stats,
     }
+    if config.transfer == "learned_3d":
+        provider_report = getattr(learned_upscaler, "last_run", None)
+        if isinstance(provider_report, dict):
+            report["learned_upscaler"] = dict(provider_report)
     return result, report

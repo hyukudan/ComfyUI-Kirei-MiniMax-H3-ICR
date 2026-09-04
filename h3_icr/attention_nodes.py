@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from .attention_profile import patch_attention_profiler, propose_attention_policy
+from .attention_profile_v2 import patch_attention_profiler_v2, propose_attention_policy_v2
 
 
 class H3ICRAttentionProfiler:
@@ -25,8 +25,9 @@ class H3ICRAttentionProfiler:
     FUNCTION = "patch"
     CATEGORY = "Kirei/MiniMax H3/ICR/Research"
     DESCRIPTION = (
-        "M5 calibration profiler. Samples normalized H3 Q/K by layer, sigma and modality without changing "
-        "attention output. It produces measurements and a policy proposal only; it never enables sparse attention."
+        "M5 passive calibration profiler. Samples normalized H3 Q/K by layer, sigma and modality, "
+        "and adds exact spatial/temporal/far QK pair evidence for target-video heads. It delegates "
+        "to the original attention backend unchanged and never enables sparse attention."
     )
 
     def patch(
@@ -39,7 +40,7 @@ class H3ICRAttentionProfiler:
         max_buckets,
         model_id,
     ):
-        patched, runtime = patch_attention_profiler(
+        patched, runtime = patch_attention_profiler_v2(
             model,
             layer_stride=layer_stride,
             query_samples=query_samples,
@@ -48,7 +49,7 @@ class H3ICRAttentionProfiler:
             max_buckets=max_buckets,
             model_id=model_id,
         )
-        return patched, {"api": 1, "runtime": runtime}
+        return patched, {"api": 2, "runtime": runtime}
 
 
 class H3ICRAttentionProfileReport:
@@ -67,7 +68,7 @@ class H3ICRAttentionProfileReport:
         if runtime is None or not hasattr(runtime, "report"):
             raise TypeError("invalid H3 ICR attention profile handle")
         report = runtime.report()
-        proposal = propose_attention_policy(report)
+        proposal = propose_attention_policy_v2(report)
         return (
             json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2),
             json.dumps(proposal, ensure_ascii=False, sort_keys=True, indent=2),

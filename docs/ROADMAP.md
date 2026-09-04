@@ -48,7 +48,7 @@ Remaining before M4 is accepted:
 - evaluate whether pass-1 trajectory replay improves the global prior over the current dynamic LR branch
 - investigate safe cache semantics instead of enabling EasyCache blindly
 
-## M5 — calibrated attention — measurement layer implemented
+## M5 — calibrated attention — profiler and experimental real sparse backend implemented
 Implemented on the experimental branch:
 - non-destructive `optimized_attention_override` profiler
 - bounded sampled Q/K analysis without materializing SxS attention
@@ -57,16 +57,24 @@ Implemented on the experimental branch:
 - target-video same-frame, spatial-local, temporal-local and 3D-local concentration metrics
 - architecture and complete-profile SHA-256 fingerprints
 - proposal-only head classification
-- explicit status that no sparse kernel is enabled yet
+- experimental PyTorch FlexAttention `BlockMask` backend
+- proposal/architecture/profile fingerprint validation
+- per-head local-3D / spatial-window / temporal-stripe target-video masks
+- all non-video context globally visible to sparse target-video queries
+- mandatory dense sigma tail
+- dense fallback for missing policy/topology, non-CUDA execution, existing attention masks or low measured block sparsity
+- BlockMask caching and real block-sparsity telemetry
 
-Next M5 gates:
-- collect real profiles across backends, prompts, reference loads, durations, aspects and M4 branches
-- bind policies to checkpoint/layout/profile fingerprints
-- implement a real block/window sparse kernel backend; dense masks do not count
-- explicit dense fallback
-- late-step densification
-- native-equivalence/no-op mode
-- decoded-media parity and VRAM/wall-time validation before any speedup claim
+Remaining before M5 is accepted:
+- collect real profiles across FL2VA / Hybrid / Ref2VA, prompts, reference loads, durations, aspects and M4 branches
+- verify profiler output neutrality on the real H3 runtime
+- run CUDA equivalence controls for the Flex backend
+- benchmark first-use and steady-state wall time separately
+- measure peak VRAM and `BlockMask.sparsity()` per layer/topology
+- derive policies by sigma/topology rather than only aggregate layer classification
+- validate dense-tail threshold and local radii from media results
+- decoded-media parity before any speedup/default claim
+- consider alternative kernels only if FlexAttention cannot deliver useful sparse execution on the target GPUs
 
 ## M6 — BaseVideo Adapter + detail LoRA
 - frozen H3 backbone

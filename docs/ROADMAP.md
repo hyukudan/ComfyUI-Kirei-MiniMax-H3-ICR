@@ -20,11 +20,32 @@
 - FL2VA / Hybrid 45–49 / Ref2VA can be run without changing this repository
 - identical-arm benchmark configuration documented
 
-## M3 — per-step fidelity — first implementation in v0.1
-- H3 NestedTensor/packed post-CFG projector implemented
-- low-frequency draft projector per H3 evaluation implemented
-- structure-first schedule implemented and telemetered
-- remaining: live ComfyUI validation with Spectrum / SA-Solver and optional latent posterior consistency `D(x0_HR) -> x0_LR`
+## M3a — per-step low-frequency fidelity — implemented experimentally
+- H3 NestedTensor/packed post-CFG projector
+- low-frequency Base-draft correction per H3 evaluation
+- structure-first sigma schedule
+- correction RMS telemetry
+- remaining: live ComfyUI validation with Spectrum / SA-Solver
+
+## M3b — latent measurement consistency — implemented experimentally
+- explicit `D(x0_HR) -> z_Base` measurement constraint
+- area-downsample measurement operator and normalized bicubic backprojection
+- measured `D(U(r))` gain normalization instead of assuming an exact adjoint
+- configurable low/full-band residual mix
+- robust residual weighting for large outliers
+- iterative re-measurement/backprojection option
+- independent RMS correction guard
+- structure-first sigma schedule
+- video-only NestedTensor/packed H3 post-CFG runtime; audio invariant preserved
+- integrated optional `H3_ICR_MEASUREMENT` input on `Kirei H3 ICR Regenerate`
+- before/after measurement-error telemetry in the main H3-ICR report
+
+Remaining before M3b is accepted:
+- decoded-media comparison against M3a-only and constraint-off controls
+- tune strength and high-band mix on dense ~1 MP and M4 2K
+- verify that lower latent measurement error does not suppress valid HR detail
+- compare one versus multiple internal projection iterations
+- evaluate whether a true VAE/pixel-space posterior step provides additional value after the latent projection baseline
 
 ## M4 — 2K renderer — experimental implementation in PR #1
 Implemented on `feature/tiled-2k-fusion`:

@@ -26,13 +26,25 @@
 - structure-first schedule implemented and telemetered
 - remaining: live ComfyUI validation with Spectrum / SA-Solver and optional latent posterior consistency D(x0_HR) -> x0_LR
 
-## M4 — 2K renderer
-- spatial tile planner over video rows only
-- global LR prior
-- overlap blend of x0/velocity at every diffusion step
+## M4 — 2K renderer — experimental implementation in PR #1
+Implemented on `feature/tiled-2k-fusion`:
+- spatial tile planner over target-video rows only
+- global dynamic LR H3 prior
+- overlap-weighted model-output fusion at every H3 evaluation
 - full global text/reference/audio context
-- stable MM-RoPE global coordinates
-- dense final tail
+- exact full-canvas MM-RoPE coordinates for target-video tile rows
+- native HR keyframe crop/downscale handling and global MM-RoPE remapping
+- Spectrum retained only on the stable global prior branch; tile calls forced actual
+- live renderer telemetry and 2048x1152 lab preset
+- fail-closed handling for unsupported topology/geometry
+
+Remaining before M4 is accepted:
+- decoded-media validation against dense ~1 MP H3-ICR
+- tune prior strength / tile geometry from measured fidelity and VRAM
+- verify HR-keyframe propagation on faces, hands, products and text
+- decide whether a dense/wider-context final tail is still required after media tests
+- evaluate whether pass-1 trajectory replay improves the global prior over the current dynamic LR branch
+- investigate safe cache semantics instead of enabling EasyCache blindly
 
 ## M5 — calibrated attention
 - per layer/head/timestep modality profiling

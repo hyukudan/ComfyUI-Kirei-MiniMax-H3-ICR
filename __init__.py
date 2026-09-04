@@ -3,6 +3,8 @@ try:
     from .h3_icr.attention_nodes import NODE_DISPLAY_NAME_MAPPINGS as ATTN_NODE_DISPLAY_NAME_MAPPINGS
     from .h3_icr.nodes import NODE_CLASS_MAPPINGS as BASE_NODE_CLASS_MAPPINGS
     from .h3_icr.nodes import NODE_DISPLAY_NAME_MAPPINGS as BASE_NODE_DISPLAY_NAME_MAPPINGS
+    from .h3_icr.posterior_nodes import NODE_CLASS_MAPPINGS as POSTERIOR_NODE_CLASS_MAPPINGS
+    from .h3_icr.posterior_nodes import NODE_DISPLAY_NAME_MAPPINGS as POSTERIOR_NODE_DISPLAY_NAME_MAPPINGS
     from .h3_icr.sparse_nodes import NODE_CLASS_MAPPINGS as SPARSE_NODE_CLASS_MAPPINGS
     from .h3_icr.sparse_nodes import NODE_DISPLAY_NAME_MAPPINGS as SPARSE_NODE_DISPLAY_NAME_MAPPINGS
     from .h3_icr.tiled_nodes import NODE_CLASS_MAPPINGS as TILED_NODE_CLASS_MAPPINGS
@@ -12,6 +14,8 @@ except ImportError:  # allows source-tree test collection where root is imported
     from h3_icr.attention_nodes import NODE_DISPLAY_NAME_MAPPINGS as ATTN_NODE_DISPLAY_NAME_MAPPINGS
     from h3_icr.nodes import NODE_CLASS_MAPPINGS as BASE_NODE_CLASS_MAPPINGS
     from h3_icr.nodes import NODE_DISPLAY_NAME_MAPPINGS as BASE_NODE_DISPLAY_NAME_MAPPINGS
+    from h3_icr.posterior_nodes import NODE_CLASS_MAPPINGS as POSTERIOR_NODE_CLASS_MAPPINGS
+    from h3_icr.posterior_nodes import NODE_DISPLAY_NAME_MAPPINGS as POSTERIOR_NODE_DISPLAY_NAME_MAPPINGS
     from h3_icr.sparse_nodes import NODE_CLASS_MAPPINGS as SPARSE_NODE_CLASS_MAPPINGS
     from h3_icr.sparse_nodes import NODE_DISPLAY_NAME_MAPPINGS as SPARSE_NODE_DISPLAY_NAME_MAPPINGS
     from h3_icr.tiled_nodes import NODE_CLASS_MAPPINGS as TILED_NODE_CLASS_MAPPINGS
@@ -19,12 +23,14 @@ except ImportError:  # allows source-tree test collection where root is imported
 
 NODE_CLASS_MAPPINGS = {
     **BASE_NODE_CLASS_MAPPINGS,
+    **POSTERIOR_NODE_CLASS_MAPPINGS,
     **TILED_NODE_CLASS_MAPPINGS,
     **ATTN_NODE_CLASS_MAPPINGS,
     **SPARSE_NODE_CLASS_MAPPINGS,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     **BASE_NODE_DISPLAY_NAME_MAPPINGS,
+    **POSTERIOR_NODE_DISPLAY_NAME_MAPPINGS,
     **TILED_NODE_DISPLAY_NAME_MAPPINGS,
     **ATTN_NODE_DISPLAY_NAME_MAPPINGS,
     **SPARSE_NODE_DISPLAY_NAME_MAPPINGS,

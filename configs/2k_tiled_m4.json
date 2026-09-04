@@ -6,6 +6,8 @@
   "overlap_width": 256,
   "overlap_height": 256,
   "prior_strength": 0.30,
+  "prior_schedule_floor": 0.15,
+  "prior_schedule_power": 1.0,
   "max_tiles": 16,
-  "notes": "M4-v0 lab preset. Apply Kirei H3 ICR Tiled 2K Patch to the MODEL before H3 ICR Regenerate."
+  "notes": "M4 lab preset. Apply Tiled 2K Patch, then Tiled Prior Schedule, then H3 ICR Regenerate."
 }

@@ -1,6 +1,6 @@
 # Validation Metrics and Result Bundles
 
-Status: deterministic latent-space triage implemented on the experimental branch. These metrics support controlled experiment ranking; they do **not** replace decoded-media inspection.
+Status: deterministic latent-space triage and passive sampler-performance instrumentation are implemented on the experimental branch. These metrics support controlled experiment ranking; they do **not** replace decoded-media inspection.
 
 ## Purpose
 
@@ -45,17 +45,13 @@ Reported values:
 
 ### `measurement_rmse`
 
-Full Base-grid latent RMSE.
-
-Lower means the regenerated HR result reproduces the Base observation more closely after spatial measurement.
+Full Base-grid latent RMSE. Lower means the regenerated HR result reproduces the Base observation more closely after spatial measurement.
 
 It must **not** be minimized blindly: a model can lower this error by suppressing useful HR detail.
 
 ### `low_frequency_rmse`
 
-The Base-grid residual after the same spatial Fourier low-pass family used by the fidelity path.
-
-This is a broad structure/layout diagnostic.
+The Base-grid residual after the same spatial Fourier low-pass family used by the fidelity path. This is a broad structure/layout diagnostic.
 
 ### `temporal_delta_rmse`
 
@@ -80,21 +76,10 @@ This is not a claim that the baseline is the true HR signal. It is a determinist
 
 Reported values:
 
-### `hr_residual_rms`
-
-Amount of HR latent information beyond the measured Base-grid baseline.
-
-### `hr_residual_spatial_gradient_rms`
-
-Spatial variation inside that HR residual. It is useful for distinguishing a flat residual from genuinely high-frequency structure.
-
-### `hr_residual_temporal_delta_rms`
-
-Temporal change of the HR residual. Very high values can indicate flickering detail, but motion/disocclusion can also raise it.
-
-### `output_spatial_gradient_rms`
-
-Overall output latent spatial-gradient energy, recorded as context.
+- `hr_residual_rms` — amount of HR latent information beyond the measured Base-grid baseline;
+- `hr_residual_spatial_gradient_rms` — spatial variation inside that residual;
+- `hr_residual_temporal_delta_rms` — temporal change of the HR residual;
+- `output_spatial_gradient_rms` — overall output latent spatial-gradient energy.
 
 No single detail metric is an optimization target by itself.
 
@@ -132,9 +117,7 @@ This is a **diagnostic**, not a proof of a seam. A real object edge can coincide
 
 ## Output fingerprint
 
-The complete output AV latent is hashed using the same canonical tensor hashing used by the validation manifest.
-
-This gives every metrics object an exact output identity in addition to the `metrics_id`.
+The complete output AV latent is hashed using the same canonical tensor hashing used by the validation manifest. This gives every metrics object an exact output identity in addition to the `metrics_id`.
 
 ## Node: Validation Result Bundle
 
@@ -155,16 +138,7 @@ bundle_json
 bundle_id
 ```
 
-The bundle preserves:
-
-```text
-run_id
-metrics_id
-```
-
-and adds its own `bundle_id` SHA-256 over the complete result record.
-
-This is the preferred unit for storing one experimental arm result.
+The bundle preserves `run_id` and `metrics_id` and adds its own `bundle_id` SHA-256 over the complete result record. This is the preferred unit for storing one experimental arm result.
 
 ## Node: Compare Validation Bundles
 
@@ -217,6 +191,50 @@ winner: null
 
 Kirei H3-ICR deliberately does not turn heterogeneous latent diagnostics into an automatic global quality score.
 
+## Passive sampler performance instrumentation
+
+Use **Kirei H3 ICR Validation Performance Patch** on the MODEL used by the experimental arm, then read **Kirei H3 ICR Validation Performance Report** after sampling.
+
+The patch uses ComfyUI's `SAMPLER_SAMPLE` wrapper, so the timer encloses the complete sampler execution rather than individual H3 blocks. The executor return value is delegated unchanged.
+
+Reported fields include:
+
+```text
+calls
+first_wall_seconds
+steady_wall_seconds_mean
+steady_wall_seconds_min
+steady_wall_seconds_max
+last_wall_seconds
+cuda_available_calls
+cpu_or_unresolved_calls
+cuda_devices
+peak_allocated_bytes_max
+peak_reserved_bytes_max
+peak_allocated_gib_max
+peak_reserved_gib_max
+```
+
+When CUDA is active, the wrapper synchronizes before and after the sampler call and resets PyTorch peak-memory counters immediately before measurement. This is intentional laboratory instrumentation and should be enabled consistently across performance arms.
+
+### First-use versus steady-state
+
+The first call is recorded separately because M5 FlexAttention/Triton compilation, mask construction and other caches can make it substantially more expensive than later calls.
+
+For speed claims report at least:
+
+```text
+first_wall_seconds
+steady_wall_seconds_mean
+steady_wall_seconds_min
+peak_allocated_gib_max
+peak_reserved_gib_max
+```
+
+Do not average the compilation/warmup call into steady-state throughput without saying so.
+
+The node reports CUDA memory only through PyTorch's allocator. It is not a replacement for process-level GPU telemetry when external allocations matter.
+
 ## Recommended reports to attach
 
 Depending on the arm, `reports_json` should include the relevant runtime telemetry:
@@ -228,7 +246,7 @@ Depending on the arm, `reports_json` should include the relevant runtime telemet
 - M4 tile/prior schedule report;
 - M5 profiler or Flex sparse report;
 - M6 adapter report;
-- wall time and VRAM measurements collected externally.
+- validation performance report.
 
 Keep large binary outputs outside the JSON bundle and refer to them by a stable filename/hash.
 
@@ -247,7 +265,7 @@ A sharper output that changes the Base draft loses even if `hr_residual_rms` is 
 
 ## First real validation sequence
 
-With manifests, latent metrics and bundle comparison implemented, the next runtime work should be:
+With manifests, latent metrics, bundle comparison and passive performance measurement implemented, the next runtime work should be:
 
 1. G1: FL2VA / Hybrid 45-49 / Ref2VA at identical Base/conditioning/noise/sigmas;
 2. select the best fidelity backend from decoded media plus controlled bundle deltas;

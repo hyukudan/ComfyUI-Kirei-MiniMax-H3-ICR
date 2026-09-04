@@ -1,0 +1,27 @@
+{
+  "arms": [
+    "fl2va_reference",
+    "hybrid_late_adaln",
+    "ref2va_reference",
+    "hybrid_all_adaln"
+  ],
+  "controlled_variables": [
+    "positive_conditioning",
+    "minimax_refs_order",
+    "minimax_keyframes",
+    "base_latent",
+    "learned_upscaler_checkpoint",
+    "target_noise_tensor",
+    "sigmas",
+    "sampler",
+    "seed",
+    "audio_latent"
+  ],
+  "ranking_order": [
+    "draft_fidelity",
+    "identity_and_object_correctness",
+    "temporal_consistency",
+    "small_text_faces_hands",
+    "perceptual_detail"
+  ]
+}

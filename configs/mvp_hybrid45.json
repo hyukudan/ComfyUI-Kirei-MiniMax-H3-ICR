@@ -1,0 +1,18 @@
+{
+  "backend": "hybrid_late_adaln",
+  "checkpoint_format": "unknown",
+  "target": {"width": 1344, "height": 768},
+  "initializer": {
+    "transfer": "learned_3d",
+    "fidelity_strength": 0.35,
+    "fidelity_cutoff": 0.25,
+    "max_correction_rms_ratio": 0.25
+  },
+  "sampling": {
+    "sigma_start": 0.5,
+    "intervals": 8,
+    "lock_audio": true,
+    "cfg": 1.0
+  },
+  "notes": "Laboratory candidate only. Compare against FL2VA and Ref2VA with identical conditioning/noise."
+}

@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.mp4
+*.mov
+*.mkv
+outputs/
+benchmarks/raw/
+.DS_Store

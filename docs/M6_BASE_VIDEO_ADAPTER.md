@@ -25,7 +25,7 @@ out_proj.bias = 0
 
 and the runtime bypasses residual injection for that provider.
 
-The scaffold is used to validate:
+The scaffold validates:
 
 - native H3 architecture binding;
 - selected block registration;
@@ -34,7 +34,8 @@ The scaffold is used to validate:
 - zero-init parity;
 - Base latent ownership/caching;
 - sigma/branch runtime metadata;
-- fail-safe behavior on unsupported M4 HR tiles.
+- dense/global-prior Base alignment;
+- M4 HR-tile Base-region reconstruction from global MM-RoPE.
 
 It is **not** a quality feature and should not be benchmarked as one.
 
@@ -76,30 +77,28 @@ Inputs at a selected native H3 block:
 
 ```text
 dynamic_hidden: H3 target-video hidden rows
-static_base:    clean H3 Base latent
+static_base:    clean H3 Base latent aligned to the active target/tile region
 ```
-
-The Base latent is spatially resampled to the active dense/global-prior target geometry and patchified with the native H3 `1x2x2` video patch contract.
 
 The module contains:
 
 ```text
 dynamic H3 hidden
-   -> LayerNorm -> dynamic projection ---+
-                                           |
-Base latent patch rows -> static projection+--> sigma gate / fusion
-                                           |
-                                           v
-                                    local 3D depthwise mixer
-                                           |
-                                    pointwise feature mixer
-                                           |
-                                       output norm
-                                           |
-                                ZERO-INITIALIZED out projection
-                                           |
-                                           v
-                                    H3 hidden residual
+   -> LayerNorm -> dynamic projection ----+
+                                            |
+aligned Base patch rows -> static projection+--> sigma gate / fusion
+                                            |
+                                            v
+                                     local 3D depthwise mixer
+                                            |
+                                     pointwise feature mixer
+                                            |
+                                        output norm
+                                            |
+                                 ZERO-INITIALIZED out projection
+                                            |
+                                            v
+                                     H3 hidden residual
 ```
 
 The local 3D mixer is intentionally linear in token count. The first scaffold does not introduce a quadratic Base-to-target attention matrix.
@@ -158,25 +157,50 @@ previous patch, if any
 
 It never silently discards an existing `double_block` replacement.
 
-This matters for interoperability with other H3 patches.
+## M4 tile alignment through global MM-RoPE
 
-## Current M4 interaction
+M4 already assigns every HR tile the exact target-video `position_ids` selected from the full-canvas H3 `PackedLayout`. M6 reuses that information instead of adding a second tile-coordinate API.
 
-The global LR M4 branch is safe because its target corresponds to the complete Base canvas.
-
-The current M6 scaffold **does not inject into M4 HR tile calls**. It fails safe/bypasses those blocks because a tile must receive the matching Base spatial region, not a resize of the complete Base scene.
-
-Before trained M6 + M4 is enabled, M4 must expose an explicit child-call contract containing at least:
+For a native H3 spatial axis:
 
 ```text
-full target latent H/W
-tile y0/y1/x0/x1
-tile branch identity
+step = 32 * patch / sqrt(full_h * full_w)
 ```
 
-M6 can then resize the Base once to the full target latent geometry and crop the exact corresponding region for each tile.
+M6 reads the first target-video frame's global H/W coordinates from the tile layout, infers the full latent area from the coordinate step, enumerates valid H/W factor pairs, and requires exactly one full-canvas geometry whose native H3 axis coordinates contain the tile axes as contiguous subsequences.
 
-This missing tile-region contract is intentional and tracked as the next M6 integration task.
+It then obtains:
+
+```text
+full_h, full_w
+y0, y1
+x0, x1
+```
+
+in latent units.
+
+The static Base stream is:
+
+```text
+clean Base latent
+  -> resize once to inferred full target latent H/W
+  -> crop exact global tile rectangle
+  -> native 1x2x2 patchify
+  -> static adapter rows
+```
+
+This avoids the incorrect alternative of resizing the complete Base scene into every HR tile.
+
+Safety rules:
+
+- missing/non-native `position_ids` fail;
+- inconsistent spatial MM-RoPE step fails;
+- ambiguous/no full-canvas factorization fails;
+- inferred crop must exactly match the active tile geometry;
+- inferred region is cached for all selected adapter blocks in one H3 tile call;
+- resized Base tensors and patch rows are cached by geometry/device/dtype.
+
+Unit tests reconstruct a known full canvas and tile solely from global MM-RoPE and require the exact original tile bounds.
 
 ## Memory-management requirement
 
@@ -237,7 +261,7 @@ Before enabling trained M6 by default:
 2. checkpoint/architecture binding tests;
 3. ComfyUI offload/lifecycle validation;
 4. dense ~1 MP decoded-media comparison against the best training-free teacher;
-5. M4 2K compatibility after tile-region metadata is implemented;
+5. real M4 2K validation of global-MM-RoPE Base cropping;
 6. identity/object/action/timing parity;
 7. faces/hands/text/detail improvement;
 8. temporal stability;

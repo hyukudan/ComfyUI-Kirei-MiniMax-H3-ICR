@@ -12,6 +12,7 @@ from h3_icr.sparse_attention import (
 from h3_icr.sparse_attention_v2 import (
     FlexSparseRuntimeV2,
     _block_mask_v2,
+    flex_kernel_options,
     policy_head_codes_v2,
     topology_matches_policy,
 )
@@ -66,6 +67,19 @@ def test_topology_binding_rejects_geometry_outside_calibration():
     assert topology_matches_policy(policy, "dense", calibrated)
     assert not topology_matches_policy(policy, "dense", _layout((2, 2, 4, 6, 1)))
     assert not topology_matches_policy(policy, "m4_hr_tile", calibrated)
+
+
+def test_flex_kernel_options_use_current_backend_api_when_available():
+    options = flex_kernel_options(True)
+    assert options["ROWS_GUARANTEED_SAFE"] is True
+    assert ("BACKEND" in options) != ("FORCE_USE_FLEX_ATTENTION" in options)
+    if "BACKEND" in options:
+        assert options["BACKEND"] == "TRITON"
+    else:
+        assert options["FORCE_USE_FLEX_ATTENTION"] is True
+
+    auto = flex_kernel_options(False)
+    assert auto == {"ROWS_GUARANTEED_SAFE": True}
 
 
 def test_blockmask_cache_is_reused_across_sigmas_for_same_topology(monkeypatch):

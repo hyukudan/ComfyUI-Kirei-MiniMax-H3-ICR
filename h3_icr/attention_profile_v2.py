@@ -29,6 +29,23 @@ PAIR_METRICS = (
 )
 
 
+def topology_descriptor(layout: Any) -> dict[str, Any]:
+    signature = tuple(int(v) for v in tuple(getattr(layout, "signature", ()))[:5])
+    if len(signature) != 5:
+        raise ValueError("H3 calibration topology requires a five-field PackedLayout signature")
+    segments = [
+        {"kind": str(kind), "rows": int(b) - int(a)}
+        for a, b, kind in getattr(layout, "segments", ())
+    ]
+    if not segments or any(row["rows"] <= 0 for row in segments):
+        raise ValueError("H3 calibration topology contains an invalid packed segment table")
+    return {"signature": signature, "segments": segments}
+
+
+def topology_digest(layout: Any) -> str:
+    return _canonical_digest(topology_descriptor(layout))
+
+
 def _target_video_neighbor_rows(
     rows: torch.Tensor,
     *,
@@ -154,6 +171,40 @@ class AttentionProfileRuntimeV2(AttentionProfileRuntime):
         super().__init__(config, architecture)
         self._pair_sums: dict[tuple[str, float, int], dict[str, list[float]]] = {}
         self._pair_counts: dict[tuple[str, float, int], int] = {}
+        self._branch_topologies: dict[str, dict[str, Any]] = {}
+
+    def begin_call(
+        self,
+        *,
+        layout: Any,
+        sigma: float,
+        branch: str,
+        latent_t: int,
+        latent_h: int,
+        latent_w: int,
+        patch_h: int,
+        patch_w: int,
+    ) -> None:
+        descriptor = topology_descriptor(layout)
+        digest = _canonical_digest(descriptor)
+        existing = self._branch_topologies.get(str(branch))
+        if existing is not None and existing["digest"] != digest:
+            raise RuntimeError(
+                "M5 calibration branch topology changed during one profile run. "
+                f"Branch {branch!r} was {existing['digest'][:12]} and is now {digest[:12]}. "
+                "Split calibration by aspect, target geometry or conditioning topology."
+            )
+        self._branch_topologies[str(branch)] = {"digest": digest, "descriptor": descriptor}
+        super().begin_call(
+            layout=layout,
+            sigma=sigma,
+            branch=branch,
+            latent_t=latent_t,
+            latent_h=latent_h,
+            latent_w=latent_w,
+            patch_h=patch_h,
+            patch_w=patch_w,
+        )
 
     @staticmethod
     def _sum(current: list[float] | None, values: list[float]) -> list[float]:
@@ -211,7 +262,10 @@ class AttentionProfileRuntimeV2(AttentionProfileRuntime):
             }
             bucket["video_pair_samples"] = count
         report["exact_pair_metrics"] = list(PAIR_METRICS)
-        report["profile_digest"] = _canonical_digest({k: v for k, v in report.items() if k != "profile_digest"})
+        report["calibrated_topologies"] = dict(self._branch_topologies)
+        report["profile_digest"] = _canonical_digest(
+            {key: value for key, value in report.items() if key != "profile_digest"}
+        )
         return report
 
 
@@ -310,6 +364,7 @@ def propose_attention_policy_v2(report: dict[str, Any]) -> dict[str, Any]:
 
     proposal["exact_pair_evidence"] = True
     proposal["pair_margin_threshold"] = 0.05
+    proposal["calibrated_topologies"] = report.get("calibrated_topologies", {})
     proposal["warning"] = (
         "Pair-margin thresholds are research heuristics used only to prioritize sparse-kernel experiments. "
         "They do not enable sparse execution and require decoded-media validation."

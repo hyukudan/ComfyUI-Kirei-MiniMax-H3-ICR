@@ -1,120 +1,116 @@
 # ComfyUI Kirei MiniMax H3 ICR
 
-**Kirei H3 ICR** is an experimental MiniMax H3 **In-Context Regeneration** stack for ComfyUI. It performs a second H3 pass over an H3 Base result, reusing the draft, original multimodal context and reference material while starting from a clean high-resolution latent initialization.
+**Kirei H3 ICR** is an experimental MiniMax H3 **In-Context Regeneration** stack for ComfyUI. It performs a second H3 pass over an H3 Base result, reusing the draft and its original multimodal context while starting from a clean high-resolution latent initialization.
 
-The project is designed around one priority: **generate additional detail without changing what happened in the Base video**.
+The project optimizes for **correct additional detail**. A result that is sharper but changes identity, objects, text, pose, action, camera, timing or scene state is considered worse.
 
 > This is an independent research implementation. It is not MiniMax H3-Regenerate-2K and does not claim to reproduce MiniMax's private regeneration or sparse-attention internals.
 
-## Project status
+## Status
 
-### Base H3-ICR path
+### Base path — M0 to M3
 
 Implemented on `main`:
 
 - backend-agnostic second pass: FL2VA, Hybrid, Ref2VA or another compatible H3 `MODEL`;
-- explicit backend provenance for controlled A/B testing;
-- strict H3 joint audio/video latent validation;
-- direct H3 Base latent injection into native `minimax_refs`;
-- `H3_LATENT_UPSCALER` API-v1 integration with the companion learned 3D latent upscaler;
-- bicubic latent control arm;
-- Fourier low-frequency initialization alignment with RMS safety limits;
-- partial-noise native H3 regeneration;
-- per-step predicted-clean fidelity projection with a structure-first decay schedule;
+- backend provenance for controlled A/B testing;
+- strict H3 joint audio/video latent contracts;
+- exact H3 Base latent injection into native `minimax_refs`;
+- learned `H3_LATENT_UPSCALER` API-v1 integration plus bicubic control;
+- Fourier low-frequency clean-latent alignment with RMS safety limits;
+- native partial-noise H3 regeneration;
+- per-step predicted-clean draft-fidelity projection;
 - exact pass-1 audio lock;
-- structured runtime reports;
-- CI-backed unit tests and Ruff checks.
+- structured runtime reports and CI-backed tests.
 
-### M4 experimental 2K path
+### M4 — experimental 2K renderer
 
-Under active development on `feature/tiled-2k-fusion` / PR #1:
+Implemented on `feature/tiled-2k-fusion` / PR #1:
 
-- one global low-resolution H3 prior call per model evaluation;
-- overlapping high-resolution target-video tiles;
-- model-output fusion **during every H3 evaluation**, not final RGB stitching;
-- weighted least-squares fusion against the global LR prior;
-- sigma-aware prior scheduling: strong structure lock near the start of pass 2, weaker prior near sigma 0 for late detail synthesis;
-- exact full-canvas MM-RoPE target coordinates inside every HR tile;
+- one global low-resolution H3 model-output prior per evaluation;
+- overlapping HR target-video tiles;
+- per-evaluation model-output fusion rather than final RGB stitching;
+- weighted least-squares fusion against the global prior;
+- sigma-aware prior decay to release late high-frequency freedom;
+- exact full-canvas MM-RoPE coordinates inside every HR tile;
 - global text, references and audio on every branch;
-- Spectrum runtime retained only on the stable global prior branch while HR tile calls are forced actual;
-- native H3 HR keyframes cropped per tile and remapped to full-canvas MM-RoPE positions;
-- keyframes downscaled consistently for the global LR branch;
-- tile planner, overlap windows and renderer telemetry;
-- explicit fail-closed behavior for unsupported topology or geometry.
+- HR `minimax_keyframes` cropped per tile and downscaled for the global branch;
+- keyframe condition rows remapped to full-canvas MM-RoPE positions;
+- Spectrum retained only on the stable global-prior topology while tile calls are forced actual;
+- fail-closed geometry/topology rules and live telemetry.
 
-M4 is **not production-validated yet**. It will remain experimental until decoded H3 media tests show that it preserves the Base video's identities, objects, motion, timing and scene state.
+### M5 — attention calibration and sparse-kernel research
 
-### M5 attention calibration path
+Implemented on the experimental branch:
 
-The first M5 layer is now implemented on the experimental branch:
+- non-destructive normalized Q/K profiler by H3 layer, head, sigma and branch;
+- bounded sampling without constructing a full S×S analysis matrix;
+- text / visual-condition / audio-condition / target-audio / target-video accounting;
+- target-video spatial, temporal and 3D-local concentration metrics;
+- architecture/profile SHA-256 fingerprints;
+- proposal-only per-head classification;
+- **experimental real block-sparse backend using PyTorch FlexAttention `BlockMask`**;
+- policy/architecture/profile fingerprint validation;
+- cross-modal context kept globally visible for sparse target-video heads;
+- head-specific local-3D, spatial-window and temporal-stripe masks;
+- mandatory dense sigma tail;
+- dense fallback when a policy, topology, device or sparsity gate is not satisfied;
+- BlockMask cache and actual block-sparsity telemetry.
 
-- non-destructive H3 `optimized_attention_override` instrumentation;
-- bounded Q/K sampling without constructing a full SxS matrix;
-- profiling by H3 layer, sigma bucket, attention head and branch;
-- modality accounting for text, visual conditions/references, audio conditions, target audio and target video;
-- target-video same-frame, spatial-local, temporal-local and 3D-local concentration estimates;
-- architecture and complete-profile SHA-256 fingerprints;
-- proposal-only head classification for later kernel experiments.
-
-**M5 does not enable sparse attention yet.** The profiler deliberately delegates to the original attention backend unchanged. A sparse policy will not be accepted until it uses real sparse kernels, validates its profile/checkpoint/layout fingerprint, has explicit dense fallback and late densification, and passes decoded-media parity tests.
+The Flex backend is **not validated or enabled by default**. Its existence is not a speedup claim; CUDA wall time, VRAM and decoded-video parity must be measured first.
 
 ## Core architecture
 
 ```text
-H3 Base generation
-    |
-    +-- clean AV latent ---------------------------+
-    |                                              |
-    +-- decoded Base video --> Qwen reference      |
-    +-- original prompt / Context-IR               |
-    +-- original images / videos / audio           |
+H3 Base
+  |
+  +-- clean AV latent -----------------------------+
+  +-- decoded Base video -> Qwen reference         |
+  +-- original Context-IR / refs / audio           |
                                                    v
-                                       common H3 conditioning
+                                        common H3 conditioning
                                                    |
-                      +----------------------------+---------------------------+
-                      |                            |                           |
-                    FL2VA                    Hybrid 45-49                  Ref2VA
-                      |                            |                           |
-                      +----------------------------+---------------------------+
+                   +-------------------------------+------------------+
+                   |                               |                  |
+                 FL2VA                       Hybrid 45-49          Ref2VA
+                   |                               |                  |
+                   +-------------------------------+------------------+
                                                    |
-                                         learned clean HR init
+                                      learned clean HR initializer
                                                    |
-                                        low-frequency alignment
+                                      low-frequency draft alignment
                                                    |
-                                           partial H3 noise
+                                            partial H3 noise
                                                    |
                                                    v
                                            H3 second pass
-                                                   |
                               +--------------------+--------------------+
                               |                                         |
-                       dense / ~1 MP                          M4 tiled / ~2K+
-                              |                                         |
-                    per-step fidelity                global LR prior + HR tiles
-                              |                         + global MM-RoPE coords
-                              |                         + HR keyframe remapping
-                              |                         + sigma-aware prior decay
-                              |                         + per-step output fusion
+                           dense                               M4 tiled 2K+
+                              |                           global LR + HR tiles
+                              |                           full-canvas MM-RoPE
+                              |                           HR keyframe remapping
+                              |                           per-step output fusion
                               +--------------------+--------------------+
                                                    |
                                                    v
                                              regenerated H3
 
-M5 research overlay:
-    active PackedLayout + sigma + branch
-                    |
-         normalized H3 Q/K samples
-                    |
-       per-head calibration profile
-                    |
-       proposal-only sparse policy
+M5 research overlay
+  PackedLayout + sigma + normalized Q/K
+                  |
+             calibration profile
+                  |
+          fingerprint-bound policy
+                  |
+       FlexAttention BlockMask [experimental]
+                  |
+       dense tail / fallback when required
 ```
 
-## Quality rule
+## Quality ranking
 
-A result that is sharper but changes the Base draft **loses**.
-
-Validation priority is:
+Validation is normative in this order:
 
 1. draft geometry and motion fidelity;
 2. identity and object correctness;
@@ -123,134 +119,93 @@ Validation priority is:
 5. perceptual detail / sharpness;
 6. wall time and memory.
 
-Do not choose a backend or renderer from a single still image or a sharpness metric.
+Do not select a backend, renderer or sparse policy from a single still frame or a sharpness score.
 
 ## Recommended base workflow
 
-1. Generate H3 Base normally and keep the clean AV latent.
-2. Build second-pass conditioning with ComfyUI's native **MiniMax H3 Reference to Video** node:
-   - include the decoded H3 Base video as a reference video so Qwen sees the draft;
-   - include the original reference images, videos and audio again;
-   - reuse the original prompt / Context-IR content;
-   - configure conditioning for the final target geometry.
-3. Optionally append the exact clean Base latent with **Kirei H3 ICR Append Base Latent Reference**. This adds a DiT-side `minimax_refs` block without a VAE round-trip.
-4. Load one controlled backend arm:
-   - FL2VA pure;
-   - Hybrid 45-49 — current laboratory detail candidate;
-   - Ref2VA pure;
-   - all-AdaLN only as a higher-risk experimental arm.
-5. Optionally tag the backend with **Kirei H3 ICR Backend Tag**.
-6. Connect the companion **MiniMax H3 Latent Upscaler Provider (3D)**.
-7. Use a partial H3 sigma schedule: `0 <= sigmas[0] < 1`.
+1. Generate H3 Base and keep its clean AV latent.
+2. Build pass-2 conditioning with native **MiniMax H3 Reference to Video**:
+   - decoded Base video as a reference so Qwen sees the draft;
+   - original prompt / Context-IR;
+   - original reference images, videos and audio;
+   - final target geometry.
+3. Optionally use **Kirei H3 ICR Append Base Latent Reference** for an exact DiT-side Base-video reference without a VAE round-trip.
+4. Load one backend arm: FL2VA, Hybrid 45-49, Ref2VA, or all-AdaLN as a high-risk control.
+5. Optionally attach **Kirei H3 ICR Backend Tag**.
+6. Connect the companion learned 3D latent-upscaler provider.
+7. Use a partial schedule: `0 <= sigmas[0] < 1`.
 8. Run **Kirei H3 ICR Regenerate**.
 
-## Backend comparison matrix
+### Controlled backend matrix
 
-The same conditioning, Base latent, target noise, sigmas, sampler, references and audio must be reused across all arms.
-
-| Arm | Model backend | Purpose |
+| Arm | MODEL backend | Purpose |
 | --- | --- | --- |
 | A | FL2VA | stability / texture baseline |
-| B | Hybrid 45-49 | current detail candidate |
+| B | Hybrid 45-49 | current laboratory detail candidate |
 | C | Ref2VA | reference-behavior control |
 | D | Hybrid all-AdaLN | higher-risk experimental control |
 
-The current expectation is **not** an accepted result. The winner must be selected from complete decoded videos.
+All other inputs must remain identical between arms.
 
-## Experimental M4 2K renderer
+## M4 2K workflow
 
-M4 avoids treating every crop as an independent video.
-
-For each H3 model evaluation:
+M4 replaces each full HR H3 evaluation with one global branch and overlapping HR tile evaluations:
 
 ```text
-current HR noisy video
-    |
-    +-- area downsample --> global LR H3 --> global model-output prior
-    |
-    +-- HR tile 1 --> H3 --+
-    +-- HR tile 2 --> H3 --+
-    +-- ...                 +--> weighted model-output fusion --> sampler
-    +-- HR tile N --> H3 --+
+current HR state
+  +-- area downsample -> global LR H3 -> global prior --------+
+  +-- HR tile 1 -> H3 ----------------------------------------+
+  +-- HR tile 2 -> H3 ----------------------------------------+--> weighted model-output fusion
+  +-- ... ----------------------------------------------------+
+  +-- HR tile N -> H3 ----------------------------------------+
 ```
 
-The fusion is performed at the same diffusion coordinate:
+Fusion is performed at the same diffusion coordinate:
 
 ```text
 y = (sum_i w_i * tile_i + lambda(sigma) * prior_hr)
     / (sum_i w_i + lambda(sigma))
 ```
 
-This is deliberately **not** a final-frame seam blend.
-
-### Prior schedule
-
-A constant global-prior weight is useful for structure, but it can suppress the high-frequency freedom we want from late H3 steps. M4 therefore exposes an optional structure-first schedule:
-
-```text
-m(sigma) = floor + (1 - floor) * (sigma / sigma_start)^power
-lambda(sigma) = prior_strength * m(sigma)
-```
-
-Recommended initial values:
-
-```text
-prior_strength:       0.30
-prior_schedule_floor: 0.15
-prior_schedule_power: 1.0
-```
-
-Recommended M4 node order:
+Recommended initial M4 chain:
 
 ```text
 MODEL
   -> Kirei H3 ICR Tiled 2K Patch
   -> Kirei H3 ICR Tiled Prior Schedule
-  -> H3 ICR Regenerate
+  -> Kirei H3 ICR Regenerate
 ```
 
-### Global MM-RoPE coordinates
-
-Native H3 creates target spatial MM-RoPE coordinates from the target shape. A naive tile call would therefore make each crop behave as if it occupied the complete frame.
-
-The M4 renderer builds the full-canvas H3 layout first and then assigns each tile the exact target-video `position_ids` that belong to its region of the full canvas. The same policy is applied to spatial HR keyframe rows.
-
-If exact global coordinate mapping cannot be established, M4 fails instead of silently falling back to local tile coordinates.
-
-### HR keyframes
-
-M4 supports native target-grid `minimax_keyframes` when their visual latent uses the full target geometry before tiling.
-
-For each global LR call:
-
-- visual keyframe latents are spatially reduced to the global prior geometry;
-- keyframe audio remains global and unchanged;
-- H3 condition-latent lists are rebuilt to match the transformed keyframes.
-
-For each HR tile:
-
-- visual keyframes are cropped to the same tile;
-- keyframe audio remains global;
-- keyframe condition rows use the corresponding full-canvas MM-RoPE coordinates.
-
-### Initial 2K laboratory preset
+Initial laboratory preset:
 
 ```text
 target:               2048 x 1152
 tile:                 1024 x 768
-requested overlap:    256 x 256
+overlap:               256 x 256 minimum
 global prior:          H3 Base latent geometry
-prior strength:       0.30
-prior schedule floor: 0.15
-prior schedule power: 1.0
+prior strength:        0.30
+prior schedule floor:  0.15
+prior schedule power:  1.0
 max tiles:             16
 ```
 
-For a typical 124-frame H3 clip, the full 2048x1152 target is about **85,248 target video tokens** before text, references and audio. A 1024x768 tile is about **28,416 target video tokens**. The initial plan normally uses six HR tiles plus one global LR call per H3 model evaluation.
+For a typical 124-frame clip, the 2048×1152 target contains about **85,248 target-video tokens** before text, references and audio; a 1024×768 tile contains about **28,416**.
 
-## M5 attention profiling and calibration
+See [`docs/M4_TILED_2K_RENDERER.md`](docs/M4_TILED_2K_RENDERER.md).
 
-M5 starts from the existing ComfyUI `optimized_attention_override` hook. The profiler samples normalized Q/K tensors and immediately delegates to the same underlying attention function, so the measurement path is intended to be output-neutral.
+## M5 attention workflow
+
+### 1. Profile
+
+Patch a controlled run with:
+
+- **Kirei H3 ICR Attention Profiler [M5 Research]**
+- **Kirei H3 ICR Attention Profile Report**
+
+The report produces:
+
+- complete calibration JSON;
+- proposal-only policy JSON.
 
 Default light-profile settings:
 
@@ -259,88 +214,94 @@ layer stride:              5
 query samples/modality:   24
 key samples/modality:     48
 sigma decimals:            3
-max calibration buckets: 2048
+max buckets:            2048
 ```
 
-For a full calibration pass, `layer_stride=1` can be used after the light profile is shown stable.
+A full calibration can later use `layer_stride=1`.
 
-The report groups calls as:
+### 2. Experimental Flex sparse run
 
-- `dense`;
-- `m4_global_prior`;
-- `m4_hr_tile`.
+The generated policy can be supplied to:
 
-For each sampled head it estimates cross-modal attention mass and target-video locality. A second JSON output converts measurements into **candidate** labels such as:
+- **Kirei H3 ICR Flex Sparse Attention [M5 Experimental]**
+- **Kirei H3 ICR Flex Sparse Report**
 
-- `local_3d_candidate`;
-- `spatial_window_candidate`;
-- `temporal_stripe_candidate`;
-- `global_or_cross_modal`;
-- `mixed_dense`.
+The backend validates the policy digest and current H3 architecture fingerprint. Supplying the original profile JSON adds source-profile verification.
 
-These labels do not change attention execution. See [`docs/M5_ATTENTION_CALIBRATION.md`](docs/M5_ATTENTION_CALIBRATION.md).
+Initial sparse settings:
 
-## Spectrum and cache compatibility
+```text
+Flex block size:          128
+dense tail sigma:        0.12
+minimum block sparsity:  5%
+local 3D radius T/Y/X:   1 / 2 / 2
+temporal stripe radius:  2
+```
+
+Policy behavior:
+
+| Head classification | Target-video K/V | Text / refs / audio |
+| --- | --- | --- |
+| global / mixed | dense | dense |
+| local 3D | local T/Y/X | global |
+| spatial window | same T + local Y/X | global |
+| temporal stripe | local T at same Y/X | global |
+
+Non-target-video queries stay dense. Late steps always return to the original ComfyUI attention path.
+
+PyTorch `BlockMask.sparsity()` is recorded so a configuration can demonstrate that blocks were actually skipped. If sparsity is too low, Kirei falls back to dense attention rather than claiming a sparse speedup.
+
+See [`docs/M5_ATTENTION_CALIBRATION.md`](docs/M5_ATTENTION_CALIBRATION.md) and [`docs/M5_FLEX_SPARSE_BACKEND.md`](docs/M5_FLEX_SPARSE_BACKEND.md).
+
+## Compatibility
 
 ### Spectrum H3
 
-Current M4 policy:
+For M4, the global LR call retains Spectrum runtime metadata while HR tile calls are forced actual. A forecasted call that does not execute H3 attention naturally contributes no Q/K sample to M5.
 
-- the single global LR prior call retains Spectrum runtime metadata;
-- HR tile child calls remove `spectrum_h3_*` runtime fields and execute as actual H3 calls;
-- forecast history is never shared across different tile topologies.
+### Attention overrides
 
-The M5 profiler can measure real attention calls. A Spectrum-forecasted call that does not execute H3 attention naturally contributes no Q/K sample.
+M5 profiler and Flex sparse execution use ComfyUI's function-style `optimized_attention_override` and are designed to chain. Existing container-style overrides are rejected until a dedicated adapter exists.
 
 ### EasyCache
 
-EasyCache is currently rejected by M4. Tile-local cache semantics have not been implemented, and sharing a cache across different tile topologies would be unsafe.
+M4 currently rejects EasyCache because sharing cache state across incompatible tile topologies is unsafe.
 
 ## Nodes
 
-### Base H3-ICR
-
-- **Kirei H3 ICR Backend Tag** — attaches explicit backend provenance to a cloned `MODEL`.
-- **Kirei H3 ICR Append Base Latent Reference** — adds the exact clean Base latent to `minimax_refs` without a VAE round-trip.
-- **Kirei H3 ICR Prepare Clean HR** — learned/bicubic clean upscale plus low-frequency draft alignment.
-- **Kirei H3 ICR Regenerate** — integrated clean initialization and native second H3 sampling pass.
-- **Kirei H3 ICR Report JSON** — renders the structured ICR report.
+### Base
+- **Kirei H3 ICR Backend Tag**
+- **Kirei H3 ICR Append Base Latent Reference**
+- **Kirei H3 ICR Prepare Clean HR**
+- **Kirei H3 ICR Regenerate**
+- **Kirei H3 ICR Report JSON**
 
 ### M4 experimental
+- **Kirei H3 ICR Tiled 2K Patch [Experimental]**
+- **Kirei H3 ICR Tiled Prior Schedule [Experimental]**
+- **Kirei H3 ICR Tiled 2K Report**
 
-- **Kirei H3 ICR Tiled 2K Patch [Experimental]** — patches a native H3 `MODEL` with global-LR + tiled-HR model-output rendering.
-- **Kirei H3 ICR Tiled Prior Schedule [Experimental]** — decays global prior regularization from structure-first to detail-friendly as sigma decreases.
-- **Kirei H3 ICR Tiled 2K Report** — exposes live tile/prior/token/keyframe/prior-schedule telemetry.
-
-### M5 research
-
-- **Kirei H3 ICR Attention Profiler [M5 Research]** — non-destructively samples Q/K by layer, sigma and modality.
-- **Kirei H3 ICR Attention Profile Report** — outputs the complete calibration profile and a proposal-only head classification.
-
-## Companion integration
-
-Preferred learned initializer:
-
-- `xmarre/Comfyui_Minimax_h3_latent_Upscaler`;
-- use its `H3_LATENT_UPSCALER` API-v1 provider.
-
-The Hybrid backend is intentionally external. This repository consumes the resulting ComfyUI `MODEL`; it does not vendor the Hybrid loader.
+### M5 research / experimental
+- **Kirei H3 ICR Attention Profiler [M5 Research]**
+- **Kirei H3 ICR Attention Profile Report**
+- **Kirei H3 ICR Flex Sparse Attention [M5 Experimental]**
+- **Kirei H3 ICR Flex Sparse Report**
 
 ## Validation plan
 
-The first combined validation should compare:
+Before merging PR #1 we will validate Base H3-ICR, M4 and M5 together. At minimum:
 
-- dense H3-ICR around ~1 MP;
-- M4 2048x1152 with constant prior;
-- M4 2048x1152 with sigma-aware prior schedule;
-- FL2VA, Hybrid 45-49 and Ref2VA arms where runtime cost permits;
+- dense ~1 MP baseline;
+- M4 2048×1152 constant and sigma-scheduled prior;
+- FL2VA / Hybrid 45-49 / Ref2VA where runtime permits;
 - M4 with and without verified HR keyframes;
-- multiple `prior_strength` values around `0.30`;
-- schedule floors around `0.10-0.25` and powers around `0.5-2.0`.
+- profiler no-op/output-neutral control;
+- Flex sparse all-dense/fallback control;
+- candidate sparse policies with measured BlockMask sparsity;
+- peak VRAM and wall time, including first-use overhead separately;
+- complete decoded-video inspection for identity, objects, hands, faces, text, motion, flicker and tile boundaries.
 
-M5 calibration should then collect profiles across the same backend/reference/aspect/duration matrix before any sparse kernel is enabled.
-
-Inspect the complete video for tile seams, identity drift, boundary errors, exposure/color discontinuity, motion discontinuity, hallucinated events, temporal flicker, actual detail gain, VRAM and wall time.
+No sparse policy becomes a default merely because it runs faster.
 
 ## Tests
 
@@ -349,29 +310,26 @@ python -m pytest
 ruff check h3_icr tests
 ```
 
-GitHub Actions runs the unit suite and Ruff on every push and pull request. Model-independent tests do not require a ComfyUI installation; actual H3 media validation requires a current ComfyUI MiniMax H3 runtime and the target model checkpoints.
+GitHub Actions runs tests and Ruff on every push and pull request. Unit tests use CPU Torch; actual Flex sparse performance requires CUDA and the real H3 runtime.
 
 ## Documentation
 
-- [`docs/SPEC_v1_2.md`](docs/SPEC_v1_2.md) — normative engineering specification.
+- [`docs/SPEC_v1_2.md`](docs/SPEC_v1_2.md) — engineering specification.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current architecture and contracts.
 - [`docs/EXPERIMENT_PROTOCOL.md`](docs/EXPERIMENT_PROTOCOL.md) — controlled media-comparison protocol.
 - [`docs/RESEARCH.md`](docs/RESEARCH.md) — research map.
 - [`docs/RESEARCH_SURVEY_v1_2.md`](docs/RESEARCH_SURVEY_v1_2.md) — literature and public-implementation survey.
-- [`docs/M4_TILED_2K_RENDERER.md`](docs/M4_TILED_2K_RENDERER.md) — M4 tiled renderer design and validation gate.
-- [`docs/M5_ATTENTION_CALIBRATION.md`](docs/M5_ATTENTION_CALIBRATION.md) — M5 profiling and calibration design.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — staged roadmap.
+- [`docs/M4_TILED_2K_RENDERER.md`](docs/M4_TILED_2K_RENDERER.md) — M4 design and validation gate.
+- [`docs/M5_ATTENTION_CALIBRATION.md`](docs/M5_ATTENTION_CALIBRATION.md) — M5 measurement design.
+- [`docs/M5_FLEX_SPARSE_BACKEND.md`](docs/M5_FLEX_SPARSE_BACKEND.md) — experimental real block-sparse backend.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone gates.
 
-## Roadmap
+## Next milestones
 
-Current order:
-
-1. validate Base H3-ICR backend matrix on decoded media;
-2. validate M4 global-LR + tiled-HR 2K rendering, sigma-aware prior scheduling and HR keyframes;
-3. collect real M5 attention profiles across backends, references, aspects and durations;
-4. add measurement-consistency / posterior-consistency experiments;
-5. implement calibrated **real sparse kernels** with fingerprint validation, dense fallback and late densification;
+1. combined decoded-media validation of Base H3-ICR + M4;
+2. real attention calibration on the target H3 backends and geometries;
+3. CUDA benchmark/parity gate for the Flex sparse backend;
+4. posterior/measurement-consistency experiments;
+5. refine sparse policy by sigma/topology from real measurements;
 6. train the state-aware BaseVideo Adapter + detail LoRA only after the training-free teacher is characterized;
-7. distill the validated teacher to fewer steps later.
-
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for milestone gates.
+7. distill the validated teacher later.

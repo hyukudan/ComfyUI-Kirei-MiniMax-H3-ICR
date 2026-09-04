@@ -1,0 +1,11 @@
+{
+  "target_width": 2048,
+  "target_height": 1152,
+  "tile_width": 1024,
+  "tile_height": 768,
+  "overlap_width": 256,
+  "overlap_height": 256,
+  "prior_strength": 0.30,
+  "max_tiles": 16,
+  "notes": "M4-v0 lab preset. Apply Kirei H3 ICR Tiled 2K Patch to the MODEL before H3 ICR Regenerate."
+}

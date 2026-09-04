@@ -258,10 +258,9 @@ def build_managed_adapter_provider(
 
             load_device = comfy.model_management.get_torch_device()
             offload_device = comfy.model_management.unet_offload_device()
-            fallback_dtype = getattr(inner, "dtype", torch.float32)
-            if not isinstance(fallback_dtype, torch.dtype):
-                fallback_dtype = torch.float32
-            module_dtype = _state_dict_dtype(tensors, fallback_dtype)
+            model_dtype = getattr(inner, "dtype", None)
+            fallback_dtype = _state_dict_dtype(tensors, torch.float32)
+            module_dtype = model_dtype if isinstance(model_dtype, torch.dtype) else fallback_dtype
             module.to(device=offload_device, dtype=module_dtype)
             managed_patcher = comfy.model_patcher.CoreModelPatcher(
                 module,

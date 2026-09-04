@@ -1,6 +1,6 @@
 # M6 — State-Aware BaseVideo Adapter
 
-Status: zero-init runtime scaffold implemented; no trained adapter checkpoint is provided or claimed.
+Status: zero-init runtime scaffold and trained-checkpoint loading ABI implemented; no trained adapter checkpoint is shipped or quality claim is made.
 
 ## Purpose
 
@@ -15,7 +15,7 @@ The H3 backbone remains frozen initially.
 
 ## Why a scaffold exists before training
 
-A trained adapter should not be introduced before its runtime contract is proven. The current M6 implementation therefore creates a provider with:
+A trained adapter should not be introduced before its runtime contract is proven. The scaffold provider is created with:
 
 ```text
 trained = false
@@ -52,6 +52,11 @@ It is **not** a quality feature and should not be benchmarked as one.
 - optional checkpoint SHA-256;
 - provenance/note field.
 
+A managed trained provider additionally contains:
+
+- validated checkpoint metadata;
+- a ComfyUI `CoreModelPatcher` owning the adapter module.
+
 Current architecture descriptor binds:
 
 ```text
@@ -66,8 +71,6 @@ AdaLN-curve format
 ```
 
 An architecture mismatch fails before a MODEL is patched.
-
-A future checkpoint loader must preserve this provider ABI rather than inventing a second application path.
 
 ## Current adapter module
 
@@ -84,21 +87,21 @@ The module contains:
 
 ```text
 dynamic H3 hidden
-   -> LayerNorm -> dynamic projection ----+
-                                            |
+   -> LayerNorm -> dynamic projection -----+
+                                             |
 aligned Base patch rows -> static projection+--> sigma gate / fusion
-                                            |
-                                            v
-                                     local 3D depthwise mixer
-                                            |
-                                     pointwise feature mixer
-                                            |
-                                        output norm
-                                            |
-                                 ZERO-INITIALIZED out projection
-                                            |
-                                            v
-                                     H3 hidden residual
+                                             |
+                                             v
+                                      local 3D depthwise mixer
+                                             |
+                                      pointwise feature mixer
+                                             |
+                                         output norm
+                                             |
+                                  ZERO-INITIALIZED out projection
+                                             |
+                                             v
+                                      H3 hidden residual
 ```
 
 The local 3D mixer is intentionally linear in token count. The first scaffold does not introduce a quadratic Base-to-target attention matrix.
@@ -189,7 +192,7 @@ clean Base latent
   -> static adapter rows
 ```
 
-This avoids the incorrect alternative of resizing the complete Base scene into every HR tile.
+This avoids resizing the complete Base scene into every HR tile.
 
 Safety rules:
 
@@ -202,35 +205,111 @@ Safety rules:
 
 Unit tests reconstruct a known full canvas and tile solely from global MM-RoPE and require the exact original tile bounds.
 
-## Memory-management requirement
+## Trained checkpoint format v1
 
-The zero-init scaffold owns no trained checkpoint and therefore does not yet expose an additional ComfyUI `ModelPatcher` from `models()`.
-
-A trained provider loader must:
-
-- wrap adapter weights in ComfyUI model-management/offload semantics;
-- expose that patcher through the block-patch `models()` chain;
-- support load/offload device transitions without orphan GPU residency;
-- avoid silently moving a large trained adapter on every block call.
-
-A trained provider is not production-safe until this is implemented.
-
-## Future trained checkpoint format
-
-The first checkpoint format should contain at minimum:
+The runtime loader accepts **safetensors only** (`.safetensors` / `.sft`) from:
 
 ```text
-api
-architecture_digest
-model_id
-adapter config
-injection blocks
-training-data / teacher identifier
-state_dict
-checkpoint_sha256 / provenance metadata
+ComfyUI/models/kirei_h3_adapters/
 ```
 
-Loading must fail closed if architecture or config is incompatible.
+The state dict must contain exactly the `StateAwareBaseVideoAdapter` tensor keys. Missing or unexpected tensors fail before the provider is created, and floating tensors containing NaN/Inf are rejected.
+
+Required safetensors metadata:
+
+```text
+kirei_h3_icr_api
+kirei_h3_icr_kind
+kirei_h3_icr_architecture_digest
+kirei_h3_icr_model_id
+kirei_h3_icr_config_json
+```
+
+Optional metadata:
+
+```text
+kirei_h3_icr_training_json
+kirei_h3_icr_note
+```
+
+Required values:
+
+```text
+kirei_h3_icr_api  = "1"
+kirei_h3_icr_kind = "base_video_adapter"
+```
+
+`config_json` must contain exactly:
+
+```json
+{
+  "injection_blocks": [12, 24, 36, 45, 48],
+  "adapter_dim": 256,
+  "gate_floor": 0.15,
+  "gate_power": 1.0,
+  "temporal_kernel": 3,
+  "spatial_kernel": 3
+}
+```
+
+Unknown or missing config fields fail closed. Injection blocks must be sorted, unique and valid for the active native H3 model.
+
+The loader calculates the complete checkpoint file SHA-256 and stores it in the provider report.
+
+## Architecture and checkpoint binding
+
+The checkpoint's architecture digest is compared against the descriptor derived from the **actual MODEL connected to the loader node**, including the checkpoint-supplied `model_id`.
+
+A trained checkpoint cannot therefore silently load on a different H3 hidden width, block count, patch contract, latent channel contract or AdaLN format.
+
+The checkpoint state dict is then loaded with exact-key/strict semantics.
+
+## ComfyUI memory management
+
+A successfully loaded trained adapter is wrapped in a ComfyUI `CoreModelPatcher` using:
+
+```text
+load_device    = get_torch_device()
+offload_device = unet_offload_device()
+```
+
+The module is converted to the active H3 model dtype when H3 exposes one; otherwise the loader uses the checkpoint floating dtype.
+
+When the adapter is applied, its patcher is registered through:
+
+```text
+MODEL.set_additional_models("h3_icr_base_video_adapter", [adapter_patcher])
+```
+
+This is important: sampler preparation includes the MODEL's nested additional models, so adapter weights participate in normal ComfyUI load/offload decisions rather than living as an unmanaged GPU module.
+
+The trained loader does not vendor or alter the H3 checkpoint.
+
+## Nodes
+
+### Zero-init ABI scaffold
+
+**Kirei H3 ICR BaseVideo Adapter Scaffold [M6]**
+
+Creates an untrained API-v1 provider for exact-parity/plumbing tests.
+
+### Trained checkpoint loader
+
+**Kirei H3 ICR Load BaseVideo Adapter [M6]**
+
+Loads and validates a safetensors checkpoint from `models/kirei_h3_adapters` and returns a managed trained provider.
+
+### Application
+
+**Kirei H3 ICR Apply BaseVideo Adapter [M6]**
+
+Accepts either the zero-init provider or a managed trained provider. Managed providers are registered as ComfyUI additional models automatically.
+
+### Report
+
+**Kirei H3 ICR BaseVideo Adapter Report**
+
+Reports architecture/checkpoint provenance, managed/offload state, branch/tile statistics and residual RMS.
 
 ## Training direction
 
@@ -258,8 +337,8 @@ Candidate losses:
 Before enabling trained M6 by default:
 
 1. zero-init scaffold exact parity;
-2. checkpoint/architecture binding tests;
-3. ComfyUI offload/lifecycle validation;
+2. safetensors metadata/strict-state architecture binding tests;
+3. real ComfyUI additional-model load/offload lifecycle validation;
 4. dense ~1 MP decoded-media comparison against the best training-free teacher;
 5. real M4 2K validation of global-MM-RoPE Base cropping;
 6. identity/object/action/timing parity;
@@ -268,4 +347,4 @@ Before enabling trained M6 by default:
 9. VRAM and wall-time overhead;
 10. ablation of injection blocks and gate schedule.
 
-No M6 improvement is claimed by the current zero-init scaffold.
+No M6 quality improvement is claimed until a trained checkpoint passes these gates.

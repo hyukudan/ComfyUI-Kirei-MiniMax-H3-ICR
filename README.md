@@ -23,33 +23,39 @@ Implemented on `main`:
 - exact pass-1 audio lock;
 - structured runtime reports and CI-backed tests.
 
-### M3b — experimental latent measurement consistency
+### M3 constraint family — experimental
 
-Implemented on `feature/tiled-2k-fusion` / PR #1 as an optional additional pass-2 constraint.
+M3 contains four deliberately separate constraints. They should be characterized independently before being combined.
+
+#### M3a — low-frequency latent fidelity
+
+Implemented in the Base path. It corrects only low spatial frequencies of predicted-clean `x0` toward the Base latent and relaxes through the second-pass trajectory so late H3 steps retain freedom for microdetail.
+
+#### M3b — normalized latent measurement backprojection
+
+Implemented on `feature/tiled-2k-fusion` / PR #1.
 
 M3b explicitly measures:
 
 ```text
-D(x0_HR) -> z_Base
+D_latent(x0_HR) -> z_Base
 ```
 
-and backprojects the Base-grid residual into the HR predicted-clean latent. Unlike the existing low-frequency fidelity projector, it can constrain a controlled portion of the **full Base-grid residual** while still leaving HR detail free when it is compatible with the Base measurement.
+and backprojects the Base-grid residual into the HR predicted-clean latent.
 
 Implemented:
 
-- area-downsample measurement operator `D`;
-- robust Base-grid residual weighting;
-- low/full-band residual mixing with `high_band_mix`;
-- bicubic residual lifting;
-- normalization from the measured `D(U(r))` response rather than assuming an exact inverse/adjoint;
-- backprojection-gain clamp;
-- independent HR correction RMS guard;
-- optional 1–N internal re-measurement iterations;
-- structure-first sigma schedule;
-- video-only NestedTensor/packed AV hooks; audio is never modified;
-- error-before/error-after, gain and correction telemetry in the normal H3-ICR report.
+- area-downsample measurement operator;
+- robust residual weighting;
+- low/full-band residual mixing;
+- normalized bicubic backprojection using measured `D(U(r))` response;
+- backprojection-gain and RMS correction guards;
+- optional internal re-measurement iterations;
+- structure-first schedule;
+- NestedTensor/packed AV support with audio untouched;
+- before/after measurement telemetry.
 
-Initial settings:
+Initial laboratory values:
 
 ```text
 strength:                  0.15
@@ -63,18 +69,66 @@ schedule_power:            1.0
 schedule_floor:            0.0
 ```
 
-Use **Kirei H3 ICR Measurement Consistency [Experimental]** and connect it to the optional `measurement_consistency` input on **Kirei H3 ICR Regenerate**.
-
-When both pass-2 constraints are enabled, the intended order is:
-
-```text
-predicted clean x0
-  -> low-frequency fidelity projector
-  -> measurement-consistency projector
-  -> sampler
-```
+Use **Kirei H3 ICR Measurement Consistency [Experimental]** and connect its handle to **Kirei H3 ICR Regenerate**.
 
 See [`docs/M3_MEASUREMENT_CONSISTENCY.md`](docs/M3_MEASUREMENT_CONSISTENCY.md).
+
+#### M3c — latent posterior gradient
+
+M3c is a separate model patch. It differentiates only through the known latent measurement operator:
+
+```text
+loss = 0.5 * ||D_latent(x0_HR) - z_Base||^2
+```
+
+No H3 denoiser or VAE gradient is used. The gradient is RMS-normalized, corrections are capped, and audio is copied through exactly.
+
+Initial values:
+
+```text
+strength:                 0.10
+apply_every:              2
+max_correction_rms_ratio: 0.05
+```
+
+Use **Kirei H3 ICR Posterior Consistency [Experimental]**.
+
+See [`docs/M3_POSTERIOR_CONSISTENCY.md`](docs/M3_POSTERIOR_CONSISTENCY.md).
+
+#### M3d — proxy-decoder pixel measurement
+
+M3d adds decoder semantics without differentiably decoding a 2K latent. The HR clean estimate is first reduced to Base latent geometry, then decoded through an H3-compatible 24-channel decoder:
+
+```text
+x0_HR
+  -> D_latent
+  -> H3 decoder at Base geometry
+  -> reduced RGB / edge / temporal measurement
+  -> pixel-space loss
+  -> gradient back to x0_HR
+```
+
+The Base reference is decoded through the **same** decoder and cached in reduced form.
+
+Recommended first decoder: ComfyUI's lightweight H3 TAE/`taeh3` proxy. Full `MiniMaxH3VideoVAE` gradient is explicit opt-in because it can be very expensive.
+
+Initial values:
+
+```text
+strength:                  0.05
+apply_every:               4
+max_correction_rms_ratio:  0.02
+measurement_max_side:     384
+frame_stride:               2
+edge_weight:               0.25
+temporal_weight:           0.10
+verify_after:              false
+allow_full_vae:            false
+```
+
+Use **Kirei H3 ICR Pixel Measurement [M3d Experimental]**.
+
+See [`docs/M3_PIXEL_MEASUREMENT.md`](docs/M3_PIXEL_MEASUREMENT.md).
 
 ### M4 — experimental 2K renderer
 
@@ -111,18 +165,18 @@ See [`docs/M4_TILED_2K_RENDERER.md`](docs/M4_TILED_2K_RENDERER.md).
 
 ### M5a — passive attention calibration v2
 
-Implemented on the experimental branch:
+Implemented experimentally:
 
-- passive normalized Q/K profiler using ComfyUI's function-style `optimized_attention_override`;
-- bounded sampling without constructing a full S×S analysis matrix;
+- passive normalized Q/K profiler through ComfyUI's function-style `optimized_attention_override`;
+- bounded sampling without a full S×S analysis matrix;
 - importance-corrected Q→K mass across text, visual conditions, audio conditions, target audio and target video;
-- exact sampled target-video QK pairs for diagonal, spatial-neighbor, temporal-neighbor and far-video evidence;
+- exact target-video QK pairs for diagonal, spatial-neighbor, temporal-neighbor and far-video evidence;
 - per-head `spatial_minus_far` and `temporal_minus_far` margins;
 - branch labels for `dense`, `m4_global_prior` and `m4_hr_tile`;
-- one canonical packed topology per branch/calibration run;
-- topology digest covering target signature plus ordered packed segment kinds/row counts;
+- canonical packed topology per branch/calibration run;
+- topology digest covering target signature plus ordered segment kinds/row counts;
 - architecture/profile SHA-256 fingerprints;
-- passive-equivalence tests: the profiler returns the wrapped attention output unchanged.
+- passive-equivalence tests.
 
 A changed target geometry, text/audio length, reference layout or keyframe layout changes the topology digest and requires a new calibration run.
 
@@ -135,33 +189,25 @@ Implemented but **not validated or enabled by default**:
 - real PyTorch `FlexAttention` + `BlockMask` execution;
 - architecture/profile/topology validation before sparse execution;
 - target-video local-3D, spatial-window and temporal-stripe patterns per head;
-- complete text/reference/keyframe/audio visibility for sparse target-video queries;
+- complete text/reference/keyframe/audio visibility;
 - all non-target-video queries remain dense;
 - mandatory dense sigma tail;
 - dense fallback on topology mismatch, CPU, external masks, incomplete policy or insufficient measured block sparsity;
-- BlockMask cache bound to topology/layer/policy/device;
-- modern `BACKEND="TRITON"` selection when supported, with legacy Flex forcing only as compatibility;
-- telemetry for sparse calls, fallback classes, mask builds/cache hits and `BlockMask.sparsity()`.
+- topology/layer/policy/device BlockMask cache;
+- modern `BACKEND="TRITON"` selection when supported;
+- telemetry for sparse/fallback calls, mask builds/cache hits and block sparsity.
 
 See [`docs/M5_FLEX_SPARSE_BACKEND.md`](docs/M5_FLEX_SPARSE_BACKEND.md).
 
-### M5c — optional topology + sigma-domain policy v3
+### M5c — topology + sigma-domain policy v3
 
-M5c does not replace M5b. It makes sparse policy selection more conservative and gives us a second operating point to compare.
-
-The profiler report emits explicit domains:
+The optional v3 policy emits explicit:
 
 ```text
 branch + topology digest + sigma + layer
 ```
 
-For each H3 call, Flex:
-
-1. passes the v2 topology gate;
-2. finds domains for that exact branch/topology;
-3. selects the nearest calibrated sigma independently per layer;
-4. accepts it only inside `max_policy_sigma_distance`;
-5. otherwise exposes no sparse head map for that call and falls back to native dense attention.
+For each H3 call, Flex passes the topology gate and selects the nearest calibrated sigma independently per layer. If the distance exceeds `max_policy_sigma_distance`, that layer falls back to native dense attention.
 
 Initial default:
 
@@ -169,7 +215,7 @@ Initial default:
 max_policy_sigma_distance: 0.03
 ```
 
-No categorical interpolation is performed between unobserved sigma points. BlockMasks are reused across sigma domains only when the effective per-head policy codes are identical.
+No categorical interpolation is performed between unobserved sigma coordinates.
 
 See [`docs/M5_SIGMA_DOMAIN_POLICY.md`](docs/M5_SIGMA_DOMAIN_POLICY.md).
 
@@ -197,9 +243,13 @@ H3 Base
                                                    v
                                            H3 second pass
                                                    |
-                              low-frequency per-step fidelity
+                                         M3a low-frequency x0
                                                    |
-                           optional M3b measurement consistency
+                              optional M3b normalized measurement
+                                                   |
+                         optional M3c latent posterior gradient
+                                                   |
+                       optional M3d proxy-decoder pixel gradient
                                                    |
                               +--------------------+--------------------+
                               |                                         |
@@ -223,7 +273,7 @@ M5 research overlay
                   |
           v2 aggregate policy + v3 sigma domains
                   |
- topology / architecture / optional sigma gate
+ topology / architecture / sigma-domain gate
                   |
       FlexAttention BlockMask [experimental]
                   |
@@ -251,11 +301,11 @@ A sharper result that changes the Base draft loses.
    - original prompt / Context-IR;
    - original reference images, videos and audio;
    - final target geometry.
-3. Optionally use **Kirei H3 ICR Append Base Latent Reference** for an exact DiT-side Base reference without a VAE round-trip.
+3. Optionally use **Kirei H3 ICR Append Base Latent Reference** for exact DiT-side Base reference conditioning.
 4. Load one controlled backend arm: FL2VA, Hybrid 45-49, Ref2VA, or all-AdaLN as a high-risk control.
 5. Optionally attach **Kirei H3 ICR Backend Tag**.
 6. Connect the companion learned 3D latent-upscaler provider.
-7. Optionally connect **Kirei H3 ICR Measurement Consistency [Experimental]**.
+7. Select at most one new M3 experimental constraint for first-pass characterization.
 8. Use a partial schedule: `0 <= sigmas[0] < 1`.
 9. Run **Kirei H3 ICR Regenerate**.
 
@@ -270,6 +320,21 @@ A sharper result that changes the Base draft loses.
 
 Everything except the backend must remain identical between arms.
 
+## M3 node composition
+
+M3a and M3b are integrated into the Regenerate path. M3c and M3d are MODEL patches and therefore compose through ComfyUI's ordered post-CFG function list.
+
+For controlled tests, prefer one experimental addition at a time:
+
+```text
+control:  M3a only
+arm B:    M3a + M3b
+arm C:    M3a + M3c
+arm D:    M3a + M3d
+```
+
+Only test M3b+M3c+M3d combinations after the individual effects are understood.
+
 ## M4 node chain
 
 ```text
@@ -277,6 +342,7 @@ MODEL
   -> Kirei H3 ICR Tiled 2K Patch
   -> Kirei H3 ICR Tiled Prior Schedule
   -> optional M5 profiler / Flex sparse patch
+  -> optional M3c or M3d MODEL patch
   -> Kirei H3 ICR Regenerate
 ```
 
@@ -290,8 +356,6 @@ Use:
 
 - **Kirei H3 ICR Attention Profiler [M5 Research]**
 - **Kirei H3 ICR Attention Profile Report**
-
-The report produces the complete topology-bound profile plus the current v3 proposal JSON, which retains aggregate v2 analysis and explicit sigma domains.
 
 Default light profile:
 
@@ -339,22 +403,33 @@ M4 currently rejects EasyCache because sharing cache state across incompatible t
 
 M5 uses ComfyUI's function-style `optimized_attention_override`. Existing container-style overrides are rejected until a dedicated compatibility adapter exists.
 
+### H3 pixel decoder
+
+M3d requires a 24-channel H3-compatible decoder. `taeh3` is the recommended first proxy. Full VisualVAE gradient is explicit opt-in.
+
 ## Nodes
 
-### Base / fidelity
+### Base / M3
+
 - **Kirei H3 ICR Backend Tag**
 - **Kirei H3 ICR Append Base Latent Reference**
 - **Kirei H3 ICR Prepare Clean HR**
-- **Kirei H3 ICR Measurement Consistency [Experimental]**
+- **Kirei H3 ICR Measurement Consistency [Experimental]** — M3b
+- **Kirei H3 ICR Posterior Consistency [Experimental]** — M3c
+- **Kirei H3 ICR Posterior Consistency Report**
+- **Kirei H3 ICR Pixel Measurement [M3d Experimental]** — M3d
+- **Kirei H3 ICR Pixel Measurement Report**
 - **Kirei H3 ICR Regenerate**
 - **Kirei H3 ICR Report JSON**
 
 ### M4 experimental
+
 - **Kirei H3 ICR Tiled 2K Patch [Experimental]**
 - **Kirei H3 ICR Tiled Prior Schedule [Experimental]**
 - **Kirei H3 ICR Tiled 2K Report**
 
 ### M5 research / experimental
+
 - **Kirei H3 ICR Attention Profiler [M5 Research]**
 - **Kirei H3 ICR Attention Profile Report**
 - **Kirei H3 ICR Flex Sparse Attention [M5 Experimental]**
@@ -365,9 +440,11 @@ M5 uses ComfyUI's function-style `optimized_attention_override`. Existing contai
 Before PR #1 leaves draft status, compare at minimum:
 
 - dense ~1 MP Base H3-ICR;
-- M3a low-frequency fidelity only;
-- M3b measurement consistency only;
+- M3a only;
 - M3a + M3b;
+- M3a + M3c;
+- M3a + M3d with `taeh3`;
+- selected M3 combinations only after single-constraint characterization;
 - M4 2048×1152 constant versus sigma-scheduled prior;
 - M4 HR keyframes on/off;
 - FL2VA / Hybrid 45-49 / Ref2VA where runtime permits;
@@ -389,7 +466,7 @@ python -m pytest
 ruff check h3_icr tests
 ```
 
-GitHub Actions runs tests and Ruff on every push and pull request. Unit tests use CPU Torch; actual M4/M5 performance validation requires a current ComfyUI MiniMax H3 CUDA runtime.
+GitHub Actions runs tests and Ruff on every push and pull request. CPU tests cover model-independent contracts; real M3d/M4/M5 performance validation requires a current ComfyUI MiniMax H3 CUDA runtime.
 
 ## Documentation
 
@@ -398,7 +475,9 @@ GitHub Actions runs tests and Ruff on every push and pull request. Unit tests us
 - [`docs/EXPERIMENT_PROTOCOL.md`](docs/EXPERIMENT_PROTOCOL.md) — controlled media-comparison protocol.
 - [`docs/RESEARCH.md`](docs/RESEARCH.md) — research map.
 - [`docs/RESEARCH_SURVEY_v1_2.md`](docs/RESEARCH_SURVEY_v1_2.md) — literature and public-implementation survey.
-- [`docs/M3_MEASUREMENT_CONSISTENCY.md`](docs/M3_MEASUREMENT_CONSISTENCY.md) — latent posterior/measurement-consistency experiment.
+- [`docs/M3_MEASUREMENT_CONSISTENCY.md`](docs/M3_MEASUREMENT_CONSISTENCY.md) — M3b normalized latent measurement backprojection.
+- [`docs/M3_POSTERIOR_CONSISTENCY.md`](docs/M3_POSTERIOR_CONSISTENCY.md) — M3c latent posterior gradient.
+- [`docs/M3_PIXEL_MEASUREMENT.md`](docs/M3_PIXEL_MEASUREMENT.md) — M3d proxy-decoder pixel measurement.
 - [`docs/M4_TILED_2K_RENDERER.md`](docs/M4_TILED_2K_RENDERER.md) — M4 design and validation gate.
 - [`docs/M5_ATTENTION_CALIBRATION.md`](docs/M5_ATTENTION_CALIBRATION.md) — passive measurement/topology-binding design.
 - [`docs/M5_FLEX_SPARSE_BACKEND.md`](docs/M5_FLEX_SPARSE_BACKEND.md) — experimental real block-sparse backend.
@@ -407,10 +486,10 @@ GitHub Actions runs tests and Ruff on every push and pull request. Unit tests us
 
 ## Next milestones
 
-1. combined decoded-media validation of Base H3-ICR + M3b + M4;
+1. combined decoded-media validation of Base H3-ICR + M3 family + M4;
 2. real attention calibration on the exact H3 backends/topologies used by that benchmark;
 3. compare M5b static topology-bound and M5c sigma-domain sparse policies;
 4. CUDA benchmark/parity gate for Flex sparse execution;
-5. evaluate whether a true VAE/pixel-space posterior step adds value beyond M3b latent consistency;
+5. decide which M3 constraint, if any, actually improves the teacher;
 6. train the state-aware BaseVideo Adapter + detail LoRA only after the training-free teacher is characterized;
 7. distill the validated teacher later.

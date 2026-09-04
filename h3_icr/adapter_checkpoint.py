@@ -73,7 +73,7 @@ class ManagedBaseVideoAdapterProvider(BaseVideoAdapterProvider):
     checkpoint_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        payload = super().to_dict()
+        payload = BaseVideoAdapterProvider.to_dict(self)
         payload.update(
             {
                 "managed_by_comfyui": self.model_patcher is not None,

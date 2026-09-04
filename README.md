@@ -52,17 +52,17 @@ Implemented on the experimental branch:
 - one canonical packed topology per branch and calibration run;
 - topology digest covering target signature plus ordered packed segment kinds/row counts;
 - architecture/profile SHA-256 fingerprints;
-- proposal-only v2 per-head classification based on both modal mass and exact-pair evidence;
-- passive-equivalence tests proving that the profiler returns the wrapped attention output unchanged.
+- proposal-only per-head classification based on modal mass plus exact-pair evidence;
+- passive-equivalence tests proving that the profiler returns wrapped attention output unchanged.
 
 A change in target geometry, text/audio length, reference-row layout or keyframe-row layout changes the topology digest. The profiler refuses to average two different topologies under the same branch name.
 
 ### M5b — experimental real Flex sparse executor v2
 
-Also implemented on the experimental branch, but **not validated or enabled by default**:
+Implemented, but **not validated or enabled by default**:
 
 - real block-sparse execution through PyTorch `FlexAttention` + `BlockMask`;
-- v2 labels `local_3d_pair_candidate`, `spatial_pair_candidate` and `temporal_pair_candidate`, plus compatibility with the original proposal labels;
+- pair-evidence sparse labels plus compatibility with the original proposal labels;
 - architecture/profile digest validation;
 - branch-specific packed-topology validation before sparse execution;
 - dense fallback when the runtime topology is outside calibration;
@@ -70,11 +70,41 @@ Also implemented on the experimental branch, but **not validated or enabled by d
 - head-specific local-3D, spatial-window and temporal-stripe masks only for target-video self-attention;
 - mandatory dense sigma tail;
 - dense fallback on CPU, existing external masks, missing/incomplete policies or insufficient measured block sparsity;
-- BlockMask cache keyed by topology/layer/policy/device but **not sigma**, so one safe mask is reused across denoising steps;
-- current PyTorch kernel selection uses `BACKEND="TRITON"` when the installed `FlexKernelOptions` supports the modern API, with `FORCE_USE_FLEX_ATTENTION` only as compatibility for older PyTorch releases;
+- BlockMask cache keyed by topology/layer/policy/device;
+- current PyTorch kernel selection uses `BACKEND="TRITON"` when supported, with legacy `FORCE_USE_FLEX_ATTENTION` compatibility;
 - telemetry for real sparse calls, dense-tail calls, topology/policy/runtime fallbacks, mask builds/cache hits and `BlockMask.sparsity()`.
 
-The existence of this code is **not a speedup or quality claim**. Real H3 CUDA wall time, VRAM and decoded-video parity must be measured before any sparse policy is accepted.
+### M5c — optional topology + sigma-domain policy v3
+
+Also implemented on the experimental branch. M5c does **not** replace M5b; it makes policy selection more conservative so both approaches can be compared during validation.
+
+The v2 profiler already records attention buckets by branch, sigma and layer. The v3 report preserves those buckets as explicit sparse-policy domains:
+
+```text
+branch + topology digest + sigma + layer
+```
+
+At runtime the Flex node now:
+
+1. passes the v2 branch/topology gate;
+2. finds domains from exactly that topology and branch;
+3. selects the nearest calibrated sigma independently per layer;
+4. accepts it only when `abs(runtime_sigma - calibrated_sigma) <= max_policy_sigma_distance`;
+5. otherwise exposes no sparse head map for that call, which makes the v2 executor fall back to native dense attention.
+
+Initial default:
+
+```text
+max_policy_sigma_distance: 0.03
+```
+
+No categorical interpolation is performed between two sparse patterns. If the runtime falls between calibrated domains by more than the configured tolerance, it stays dense.
+
+BlockMasks can still be reused across different sigma domains **only when the selected per-head policy codes are identical**. If the head classifications change, the cache key changes and a distinct mask is built.
+
+M5c telemetry adds sigma-domain match/fallback counts and the observed domain distance. See [`docs/M5_SIGMA_DOMAIN_POLICY.md`](docs/M5_SIGMA_DOMAIN_POLICY.md).
+
+The existence of M5b/M5c code is **not a speedup or quality claim**. Real H3 CUDA wall time, VRAM and decoded-video parity must be measured before any sparse policy is accepted.
 
 ## Core architecture
 
@@ -121,12 +151,14 @@ M5a passive calibration
                   |
        architecture + topology-bound profile
                   |
-           proposal-only per-head policy
+       proposal-only per-head policy + sigma domains
 
-M5b experimental execution
-        validated v2 proposal
+M5b/M5c experimental execution
+        validated proposal
                   |
          topology/architecture gate
+                  |
+        optional sigma-domain gate
                   |
       FlexAttention real BlockMask kernel
                   |
@@ -220,7 +252,7 @@ See [`docs/M4_TILED_2K_RENDERER.md`](docs/M4_TILED_2K_RENDERER.md).
 
 ## M5 attention workflow
 
-### 1. Passive v2 calibration
+### 1. Passive calibration
 
 Patch a controlled run with:
 
@@ -229,8 +261,8 @@ Patch a controlled run with:
 
 The report produces:
 
-- complete v2 calibration JSON;
-- proposal-only v2 policy JSON.
+- complete topology-bound calibration JSON;
+- proposal-only **v3 policy JSON**, retaining the v2 aggregate layer analysis plus explicit sigma domains.
 
 Default light-profile settings:
 
@@ -244,25 +276,26 @@ max buckets:            2048
 
 A full calibration can later use `layer_stride=1`.
 
-For each branch, keep target geometry and the complete packed conditioning topology fixed. If you want to benchmark another aspect ratio, duration, ref set or keyframe layout, create another calibration run rather than reusing the previous policy.
+For each branch, keep target geometry and complete packed conditioning topology fixed. Another aspect ratio, duration, ref set or keyframe layout requires another calibration run rather than transferring the previous topology.
 
 ### 2. Experimental Flex sparse run
 
-Supply the generated v2 policy to:
+Supply the generated v3 policy to:
 
 - **Kirei H3 ICR Flex Sparse Attention [M5 Experimental]**
 - **Kirei H3 ICR Flex Sparse Report**
 
 Supplying the original profile JSON adds full source-profile verification.
 
-Initial sparse settings:
+Initial settings:
 
 ```text
-Flex block size:          128
-dense tail sigma:        0.12
-minimum block sparsity:  5%
-local 3D radius T/Y/X:   1 / 2 / 2
-temporal stripe radius:  2
+Flex block size:            128
+dense tail sigma:          0.12
+max policy sigma distance: 0.03
+minimum block sparsity:    5%
+local 3D radius T/Y/X:     1 / 2 / 2
+temporal stripe radius:    2
 ```
 
 Policy behavior:
@@ -274,13 +307,11 @@ Policy behavior:
 | spatial pair candidate | same T + local Y/X | global |
 | temporal pair candidate | local T at same Y/X | global |
 
-The original `*_candidate` labels remain accepted for comparison with earlier profiles.
-
-Non-target-video queries stay dense. Late steps always return to the original ComfyUI attention path. A topology mismatch also returns to dense rather than transferring a calibrated pattern to a new layout.
+Non-target-video queries stay dense. Late steps always return to the original ComfyUI attention path. A topology mismatch or sigma-domain miss also returns to dense rather than transferring an uncalibrated pattern.
 
 PyTorch `BlockMask.sparsity()` is recorded so a configuration can demonstrate that blocks were actually skipped. If sparsity is too low, Kirei stays dense rather than claiming a sparse speedup.
 
-See [`docs/M5_ATTENTION_CALIBRATION.md`](docs/M5_ATTENTION_CALIBRATION.md) and [`docs/M5_FLEX_SPARSE_BACKEND.md`](docs/M5_FLEX_SPARSE_BACKEND.md).
+See [`docs/M5_ATTENTION_CALIBRATION.md`](docs/M5_ATTENTION_CALIBRATION.md), [`docs/M5_FLEX_SPARSE_BACKEND.md`](docs/M5_FLEX_SPARSE_BACKEND.md), and [`docs/M5_SIGMA_DOMAIN_POLICY.md`](docs/M5_SIGMA_DOMAIN_POLICY.md).
 
 ## Compatibility
 
@@ -330,10 +361,11 @@ Before merging PR #1 we will validate Base H3-ICR, M4 and M5 together. At minimu
 - M4 with and without verified HR keyframes;
 - profiler passive/no-op output control;
 - separate calibration for every packed topology under test;
-- Flex sparse all-dense/fallback control;
-- topology-mismatch fallback control;
+- M5b static topology-bound policy control;
+- M5c sigma-domain policy;
+- topology-mismatch and sigma-domain-miss dense fallbacks;
 - candidate sparse policies with measured BlockMask sparsity;
-- mask-build and mask-cache-hit rates;
+- mask-build/cache-hit and sigma-domain match/fallback rates;
 - peak VRAM and wall time, including first-use overhead separately;
 - complete decoded-video inspection for identity, objects, hands, faces, text, motion, flicker and tile boundaries.
 
@@ -358,14 +390,15 @@ GitHub Actions runs tests and Ruff on every push and pull request. Unit tests us
 - [`docs/M4_TILED_2K_RENDERER.md`](docs/M4_TILED_2K_RENDERER.md) — M4 design and validation gate.
 - [`docs/M5_ATTENTION_CALIBRATION.md`](docs/M5_ATTENTION_CALIBRATION.md) — M5 passive measurement and topology-binding design.
 - [`docs/M5_FLEX_SPARSE_BACKEND.md`](docs/M5_FLEX_SPARSE_BACKEND.md) — experimental topology-bound real block-sparse backend.
+- [`docs/M5_SIGMA_DOMAIN_POLICY.md`](docs/M5_SIGMA_DOMAIN_POLICY.md) — optional sigma-domain policy layer and dense-fallback contract.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone gates.
 
 ## Next milestones
 
 1. combined decoded-media validation of Base H3-ICR + M4;
-2. real v2 attention calibration on the exact H3 backends and packed topologies used in the benchmark;
-3. CUDA benchmark/parity gate for the topology-bound Flex sparse backend;
-4. posterior/measurement-consistency experiments;
-5. refine sparse policy by sigma/topology from real measurements;
+2. real attention calibration on the exact H3 backends and packed topologies used in the benchmark;
+3. compare M5b static topology-bound and M5c sigma-domain sparse policies;
+4. CUDA benchmark/parity gate for the Flex sparse backend;
+5. posterior/measurement-consistency experiments;
 6. train the state-aware BaseVideo Adapter + detail LoRA only after the training-free teacher is characterized;
 7. distill the validated teacher later.

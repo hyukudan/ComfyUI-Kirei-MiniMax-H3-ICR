@@ -111,6 +111,8 @@ max_abs
 
 For the normal H3-ICR audio-lock path, `exact=true` is the expected result.
 
+If output/Base audio shapes differ, `rmse` and `max_abs` are `null`; shape mismatch already constitutes a failed audio invariant and avoids non-standard JSON infinities.
+
 A visually improved arm that unexpectedly changes locked pass-1 audio fails the experiment.
 
 ## M4 seam diagnostic
@@ -164,6 +166,57 @@ and adds its own `bundle_id` SHA-256 over the complete result record.
 
 This is the preferred unit for storing one experimental arm result.
 
+## Node: Compare Validation Bundles
+
+Use **Kirei H3 ICR Compare Validation Bundles** only after each arm has been wrapped in a result bundle.
+
+The comparator first applies the same strict manifest rules used by **Compare Validation Manifests**. Metric deltas are meaningful only when that comparison is controlled.
+
+Inputs:
+
+```text
+bundle_a
+bundle_b
+allowed_differences
+fail_on_unexpected_difference = true
+```
+
+Examples:
+
+```text
+backend comparison:
+arm.backend
+
+M3 strength comparison:
+arm.settings.m3.strength
+```
+
+If Base latent, conditioning, sigma tensor, NOISE, SAMPLER or any other locked field changes unexpectedly, `comparable=false`; with fail mode enabled the node raises before the metric deltas can be treated as evidence.
+
+For shared scalar metrics the report computes:
+
+```text
+delta_b_minus_a = metric_B - metric_A
+relative_delta  = delta / abs(metric_A)   # only when A is non-zero
+```
+
+Direction hints are intentionally conservative:
+
+- Base-compatibility errors: lower means closer to the Base measurement;
+- locked-audio RMSE/max error: zero is expected;
+- M4 seam ratios: lower is less suspicious, but still not a quality score;
+- detail metrics: diagnostic only; there is no monotonic "more is better" rule.
+
+Boolean flags such as `audio.exact` are reported separately as flag changes.
+
+The comparison always returns:
+
+```text
+winner: null
+```
+
+Kirei H3-ICR deliberately does not turn heterogeneous latent diagnostics into an automatic global quality score.
+
 ## Recommended reports to attach
 
 Depending on the arm, `reports_json` should include the relevant runtime telemetry:
@@ -194,10 +247,10 @@ A sharper output that changes the Base draft loses even if `hr_residual_rms` is 
 
 ## First real validation sequence
 
-With manifests and latent metrics implemented, the next runtime work should be:
+With manifests, latent metrics and bundle comparison implemented, the next runtime work should be:
 
 1. G1: FL2VA / Hybrid 45-49 / Ref2VA at identical Base/conditioning/noise/sigmas;
-2. select the best fidelity backend;
+2. select the best fidelity backend from decoded media plus controlled bundle deltas;
 3. G2: M3a / M3a+M3b / M3a+M3c / M3a+M3d on that backend;
 4. only then move the best teacher candidate to M4 2K and later M5/M6.
 

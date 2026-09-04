@@ -24,7 +24,7 @@
 - H3 NestedTensor/packed post-CFG projector implemented
 - low-frequency draft projector per H3 evaluation implemented
 - structure-first schedule implemented and telemetered
-- remaining: live ComfyUI validation with Spectrum / SA-Solver and optional latent posterior consistency D(x0_HR) -> x0_LR
+- remaining: live ComfyUI validation with Spectrum / SA-Solver and optional latent posterior consistency `D(x0_HR) -> x0_LR`
 
 ## M4 — 2K renderer — experimental implementation in PR #1
 Implemented on `feature/tiled-2k-fusion`:
@@ -48,11 +48,25 @@ Remaining before M4 is accepted:
 - evaluate whether pass-1 trajectory replay improves the global prior over the current dynamic LR branch
 - investigate safe cache semantics instead of enabling EasyCache blindly
 
-## M5 — calibrated attention
-- per layer/head/timestep modality profiling
-- real sparse kernel backend only; dense masks do not count
-- checkpoint/layout-bound profile hashes
-- dense fallback and late densification
+## M5 — calibrated attention — measurement layer implemented
+Implemented on the experimental branch:
+- non-destructive `optimized_attention_override` profiler
+- bounded sampled Q/K analysis without materializing SxS attention
+- layer/head/sigma/branch buckets
+- text / visual-condition / audio-condition / target-audio / target-video modality accounting
+- target-video same-frame, spatial-local, temporal-local and 3D-local concentration metrics
+- architecture and complete-profile SHA-256 fingerprints
+- proposal-only head classification
+- explicit status that no sparse kernel is enabled yet
+
+Next M5 gates:
+- collect real profiles across backends, prompts, reference loads, durations, aspects and M4 branches
+- bind policies to checkpoint/layout/profile fingerprints
+- implement a real block/window sparse kernel backend; dense masks do not count
+- explicit dense fallback
+- late-step densification
+- native-equivalence/no-op mode
+- decoded-media parity and VRAM/wall-time validation before any speedup claim
 
 ## M6 — BaseVideo Adapter + detail LoRA
 - frozen H3 backbone

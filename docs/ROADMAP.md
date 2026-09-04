@@ -48,33 +48,52 @@ Remaining before M4 is accepted:
 - evaluate whether pass-1 trajectory replay improves the global prior over the current dynamic LR branch
 - investigate safe cache semantics instead of enabling EasyCache blindly
 
-## M5 — calibrated attention — profiler and experimental real sparse backend implemented
+## M5a — passive calibrated attention v2 — implemented experimentally
 Implemented on the experimental branch:
-- non-destructive `optimized_attention_override` profiler
+- passive function-style `optimized_attention_override` profiler
+- output-neutral/no-op test contract
 - bounded sampled Q/K analysis without materializing SxS attention
-- layer/head/sigma/branch buckets
-- text / visual-condition / audio-condition / target-audio / target-video modality accounting
-- target-video same-frame, spatial-local, temporal-local and 3D-local concentration metrics
-- architecture and complete-profile SHA-256 fingerprints
-- proposal-only head classification
-- experimental PyTorch FlexAttention `BlockMask` backend
-- proposal/architecture/profile fingerprint validation
-- per-head local-3D / spatial-window / temporal-stripe target-video masks
-- all non-video context globally visible to sparse target-video queries
-- mandatory dense sigma tail
-- dense fallback for missing policy/topology, non-CUDA execution, existing attention masks or low measured block sparsity
-- BlockMask caching and real block-sparsity telemetry
+- importance-corrected modality mass for text / visual condition / audio condition / target audio / target video
+- exact sampled target-video QK pairs: diagonal, spatial neighbor, temporal neighbor and far-video
+- exact `spatial_minus_far` / `temporal_minus_far` margins per head
+- layer/head/sigma/M4-branch buckets
+- one canonical packed topology per branch per calibration run
+- topology descriptor includes native target signature plus ordered segment kinds/row counts
+- architecture, topology and complete-profile SHA-256 fingerprints
+- proposal-only v2 head classification using both modal mass and exact-pair evidence
 
-Remaining before M5 is accepted:
-- collect real profiles across FL2VA / Hybrid / Ref2VA, prompts, reference loads, durations, aspects and M4 branches
-- verify profiler output neutrality on the real H3 runtime
-- run CUDA equivalence controls for the Flex backend
-- benchmark first-use and steady-state wall time separately
-- measure peak VRAM and `BlockMask.sparsity()` per layer/topology
-- derive policies by sigma/topology rather than only aggregate layer classification
-- validate dense-tail threshold and local radii from media results
-- decoded-media parity before any speedup/default claim
-- consider alternative kernels only if FlexAttention cannot deliver useful sparse execution on the target GPUs
+Remaining before M5a is accepted:
+- collect real profiles across FL2VA / Hybrid / Ref2VA
+- separate calibration by target geometry, duration and packed reference/keyframe topology
+- full `layer_stride=1` runs after light-profile stability is confirmed
+- quantify run-to-run / seed stability of head classification
+- verify profiler overhead and output neutrality on the real CUDA H3 runtime
+
+## M5b — real FlexAttention sparse executor v2 — implemented experimentally
+Implemented on the experimental branch:
+- real PyTorch FlexAttention + `BlockMask` execution path
+- current and legacy proposal-label compatibility
+- proposal/architecture/profile fingerprint validation
+- runtime branch-specific packed-topology validation
+- dense topology fallback outside the calibrated domain
+- per-head local-3D / spatial / temporal target-video patterns
+- all text/reference/keyframe/audio and non-target-video links remain global/dense
+- mandatory dense sigma tail
+- dense fallback on non-CUDA, external masks, incomplete/dense policies or low measured block sparsity
+- topology/layer/policy/device BlockMask cache reused across sigma coordinates
+- modern PyTorch `BACKEND="TRITON"` selection with legacy `FORCE_USE_FLEX_ATTENTION` compatibility
+- runtime telemetry for sparse calls, all fallback classes, mask builds/cache hits and measured BlockMask sparsity
+
+Remaining before M5b is accepted:
+- real CUDA equivalence controls on the target H3 checkpoints
+- benchmark first-use compilation/mask-build overhead separately from steady-state execution
+- peak VRAM and wall-time measurements on dense ~1 MP and M4 2K
+- actual BlockMask sparsity per layer/head topology
+- topology-fallback and policy-fallback rates
+- tune dense-tail sigma and local radii from decoded media rather than statistics alone
+- evaluate sigma-specific policies only after static topology-bound policies pass parity
+- complete decoded-video parity before any speedup/default claim
+- consider alternative sparse kernels only if FlexAttention cannot deliver a useful measured gain on the target GPUs
 
 ## M6 — BaseVideo Adapter + detail LoRA
 - frozen H3 backbone

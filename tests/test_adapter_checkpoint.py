@@ -71,10 +71,13 @@ def _checkpoint_fixture():
         adapter_dim=32,
         model_id="fake-h3",
     )
-    # Simulate a trained checkpoint: make the output projection non-zero.
+    # Simulate a trained checkpoint: give each block-specific residual head a
+    # different non-zero value while keeping the shared trunk unchanged.
     with torch.no_grad():
-        scaffold.module.out_proj.weight.fill_(0.01)
-        scaffold.module.out_proj.bias.fill_(0.02)
+        scaffold.module.out_proj["1"].weight.fill_(0.01)
+        scaffold.module.out_proj["1"].bias.fill_(0.02)
+        scaffold.module.out_proj["3"].weight.fill_(0.03)
+        scaffold.module.out_proj["3"].bias.fill_(0.04)
     state = {key: value.detach().clone() for key, value in scaffold.module.state_dict().items()}
     metadata = adapter_checkpoint_metadata_for_export(
         scaffold,
@@ -132,10 +135,12 @@ def test_build_managed_provider_strict_loads_and_binds_checkpoint():
     assert provider.architecture_digest == scaffold.architecture_digest
     assert provider.model_patcher.model is provider.module
     assert sentinel["module"] is provider.module
-    assert provider.module.out_proj.weight.abs().mean().item() > 0.0
+    assert provider.module.out_proj["1"].weight.abs().mean().item() > 0.0
+    assert provider.module.out_proj["3"].weight.abs().mean().item() > provider.module.out_proj["1"].weight.abs().mean().item()
     report = provider.to_dict()
     assert report["managed_by_comfyui"] is True
     assert report["checkpoint_metadata"]["training"]["teacher"] == "synthetic"
+    assert report["residual_head_mode"] == "per_injection_block"
 
 
 def test_build_managed_provider_rejects_missing_state_tensor():

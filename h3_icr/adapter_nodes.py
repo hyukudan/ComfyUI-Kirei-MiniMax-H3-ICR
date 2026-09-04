@@ -1,13 +1,35 @@
 from __future__ import annotations
 
 import json
+import os
 
+from .adapter_checkpoint import (
+    ManagedBaseVideoAdapterProvider,
+    load_managed_adapter_checkpoint,
+    patch_managed_base_video_adapter,
+)
 from .base_video_adapter import (
     BaseVideoAdapterProvider,
     create_zero_init_base_adapter_provider,
     patch_base_video_adapter,
 )
 from .contracts import unwrap_av
+
+ADAPTER_FOLDER = "kirei_h3_adapters"
+
+
+def _adapter_checkpoint_names() -> list[str]:
+    try:
+        import folder_paths
+    except ImportError:
+        return []
+    path = os.path.join(folder_paths.models_dir, ADAPTER_FOLDER)
+    folder_paths.add_model_folder_path(ADAPTER_FOLDER, path, is_default=True)
+    try:
+        names = folder_paths.get_filename_list(ADAPTER_FOLDER)
+    except Exception:
+        return []
+    return [name for name in names if os.path.splitext(name)[1].lower() in {".safetensors", ".sft"}]
 
 
 class H3ICRBaseVideoAdapterScaffold:
@@ -60,6 +82,39 @@ class H3ICRBaseVideoAdapterScaffold:
         return provider, json.dumps(provider.to_dict(), ensure_ascii=False, sort_keys=True, indent=2)
 
 
+class H3ICRLoadBaseVideoAdapter:
+    @classmethod
+    def INPUT_TYPES(cls):
+        names = _adapter_checkpoint_names()
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "checkpoint": (names if names else [""],),
+            }
+        }
+
+    RETURN_TYPES = ("H3_ICR_BASE_ADAPTER_PROVIDER", "STRING")
+    RETURN_NAMES = ("adapter_provider", "provider_json")
+    FUNCTION = "load"
+    CATEGORY = "Kirei/MiniMax H3/ICR/Research"
+    DESCRIPTION = (
+        "Load a trained M6 BaseVideo Adapter safetensors checkpoint from models/kirei_h3_adapters. "
+        "Metadata API, architecture SHA-256, model_id, exact adapter config and state_dict are validated before "
+        "the provider is returned. The adapter is wrapped as a ComfyUI CoreModelPatcher for normal load/offload."
+    )
+
+    def load(self, model, checkpoint):
+        if not checkpoint:
+            raise ValueError(
+                "no M6 adapter checkpoint selected; place a .safetensors file in models/kirei_h3_adapters"
+            )
+        import folder_paths
+
+        path = folder_paths.get_full_path_or_raise(ADAPTER_FOLDER, checkpoint)
+        provider = load_managed_adapter_checkpoint(model, path)
+        return provider, json.dumps(provider.to_dict(), ensure_ascii=False, sort_keys=True, indent=2)
+
+
 class H3ICRApplyBaseVideoAdapter:
     @classmethod
     def INPUT_TYPES(cls):
@@ -77,10 +132,9 @@ class H3ICRApplyBaseVideoAdapter:
     FUNCTION = "apply"
     CATEGORY = "Kirei/MiniMax H3/ICR/Research"
     DESCRIPTION = (
-        "Apply an M6 BaseVideo Adapter provider to selected native H3 blocks. The current scaffold provider "
-        "is intentionally untrained and bypasses residual injection. Trained providers must use the same ABI "
-        "and architecture fingerprint. M4 HR-tile injection is currently fail-safe/bypassed until the explicit "
-        "global tile-region contract is added."
+        "Apply an M6 BaseVideo Adapter provider to selected native H3 blocks. Zero-init scaffold providers are "
+        "exact no-ops. Trained managed providers are registered as ComfyUI additional models so their weights "
+        "follow normal load/offload semantics. M4 HR tiles use the exact Base region inferred from global MM-RoPE."
     )
 
     def apply(self, model, base_latent, adapter_provider, strength):
@@ -89,12 +143,20 @@ class H3ICRApplyBaseVideoAdapter:
         if not isinstance(base_latent, dict) or "samples" not in base_latent:
             raise TypeError("base_latent must be a ComfyUI LATENT containing H3 AV samples")
         base_video, _ = unwrap_av(base_latent["samples"])
-        patched, runtime = patch_base_video_adapter(
-            model,
-            base_video,
-            adapter_provider,
-            strength=float(strength),
-        )
+        if isinstance(adapter_provider, ManagedBaseVideoAdapterProvider):
+            patched, runtime = patch_managed_base_video_adapter(
+                model,
+                base_video,
+                adapter_provider,
+                strength=float(strength),
+            )
+        else:
+            patched, runtime = patch_base_video_adapter(
+                model,
+                base_video,
+                adapter_provider,
+                strength=float(strength),
+            )
         return patched, {"api": 1, "runtime": runtime}
 
 
@@ -118,12 +180,14 @@ class H3ICRBaseVideoAdapterReport:
 
 NODE_CLASS_MAPPINGS = {
     "H3ICRBaseVideoAdapterScaffold": H3ICRBaseVideoAdapterScaffold,
+    "H3ICRLoadBaseVideoAdapter": H3ICRLoadBaseVideoAdapter,
     "H3ICRApplyBaseVideoAdapter": H3ICRApplyBaseVideoAdapter,
     "H3ICRBaseVideoAdapterReport": H3ICRBaseVideoAdapterReport,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3ICRBaseVideoAdapterScaffold": "Kirei H3 ICR BaseVideo Adapter Scaffold [M6]",
+    "H3ICRLoadBaseVideoAdapter": "Kirei H3 ICR Load BaseVideo Adapter [M6]",
     "H3ICRApplyBaseVideoAdapter": "Kirei H3 ICR Apply BaseVideo Adapter [M6]",
     "H3ICRBaseVideoAdapterReport": "Kirei H3 ICR BaseVideo Adapter Report",
 }

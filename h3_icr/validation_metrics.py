@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from typing import Any
 
 import torch
@@ -10,7 +9,12 @@ import torch
 from .contracts import unwrap_av
 from .fidelity import fourier_lowpass, resize_video
 from .tiling import plan_spatial_tiles
-from .validation import canonical_descriptor, fingerprint, validate_manifest_integrity
+from .validation import (
+    canonical_descriptor,
+    compare_validation_manifests,
+    fingerprint,
+    validate_manifest_integrity,
+)
 
 METRICS_API = 1
 METRICS_SCHEMA = "h3_icr_latent_metrics/v1"
@@ -105,7 +109,7 @@ def _seam_metrics(video: torch.Tensor, renderer: Any) -> dict[str, Any] | None:
     patch_h = int(_config_value(config, "patch_h", 2))
     patch_w = int(_config_value(config, "patch_w", 2))
     full_h, full_w = int(video.shape[-2]), int(video.shape[-1])
-    if min(tile_h, tile_w) <= 0 or tile_h >= full_h and tile_w >= full_w:
+    if min(tile_h, tile_w) <= 0 or (tile_h >= full_h and tile_w >= full_w):
         return {
             "active": False,
             "reason": "renderer_not_tiling_this_geometry",
@@ -183,8 +187,8 @@ def evaluate_latent_output(
 
     audio_shape_equal = tuple(output_audio.shape) == tuple(base_audio.shape)
     audio_exact = False
-    audio_rmse = math.inf
-    audio_max_abs = math.inf
+    audio_rmse: float | None = None
+    audio_max_abs: float | None = None
     if audio_shape_equal:
         base_audio_on_output = base_audio.to(device=output_audio.device, dtype=output_audio.dtype)
         audio_diff = output_audio - base_audio_on_output
@@ -282,3 +286,108 @@ def validate_bundle_integrity(bundle: dict[str, Any]) -> None:
     core.pop("bundle_id", None)
     if expected != _digest(core):
         raise ValueError("validation bundle_id does not match its content")
+
+
+def _shared_metric_scalars(metrics: dict[str, Any]) -> dict[str, float]:
+    result: dict[str, float] = {}
+    sections = {
+        "base_compatibility": metrics.get("base_compatibility", {}),
+        "detail": metrics.get("detail", {}),
+        "audio": metrics.get("audio", {}),
+        "m4_seams": metrics.get("m4_seams", {}),
+    }
+    for section, values in sections.items():
+        if not isinstance(values, dict):
+            continue
+        for key, value in values.items():
+            if isinstance(value, bool) or value is None:
+                continue
+            if isinstance(value, (int, float)):
+                result[f"$.{section}.{key}"] = float(value)
+    return result
+
+
+def _shared_metric_flags(metrics: dict[str, Any]) -> dict[str, bool]:
+    result: dict[str, bool] = {}
+    for section in ("audio", "m4_seams"):
+        values = metrics.get(section, {})
+        if not isinstance(values, dict):
+            continue
+        for key, value in values.items():
+            if isinstance(value, bool):
+                result[f"$.{section}.{key}"] = value
+    return result
+
+
+def _direction_hint(path: str) -> str:
+    if path.startswith("$.base_compatibility."):
+        return "lower_is_more_base_compatible"
+    if path in {"$.audio.rmse", "$.audio.max_abs"}:
+        return "zero_expected_when_audio_is_locked"
+    if path in {"$.m4_seams.boundary_x_ratio", "$.m4_seams.boundary_y_ratio"}:
+        return "lower_is_less_suspicious_but_not_a_quality_score"
+    if path.startswith("$.detail."):
+        return "diagnostic_only_no_monotonic_quality_direction"
+    return "diagnostic_only"
+
+
+def compare_validation_result_bundles(
+    bundle_a: dict[str, Any],
+    bundle_b: dict[str, Any],
+    *,
+    allowed_differences: str = "",
+) -> dict[str, Any]:
+    validate_bundle_integrity(bundle_a)
+    validate_bundle_integrity(bundle_b)
+    manifest_report = compare_validation_manifests(
+        bundle_a["manifest"],
+        bundle_b["manifest"],
+        allowed_differences=allowed_differences,
+    )
+
+    scalars_a = _shared_metric_scalars(bundle_a["metrics"])
+    scalars_b = _shared_metric_scalars(bundle_b["metrics"])
+    scalar_deltas = []
+    for path in sorted(set(scalars_a) & set(scalars_b)):
+        a_value = scalars_a[path]
+        b_value = scalars_b[path]
+        delta = b_value - a_value
+        relative_delta = None
+        if abs(a_value) > 1e-12:
+            relative_delta = delta / abs(a_value)
+        scalar_deltas.append(
+            {
+                "path": path,
+                "a": a_value,
+                "b": b_value,
+                "delta_b_minus_a": delta,
+                "relative_delta": relative_delta,
+                "direction_hint": _direction_hint(path),
+            }
+        )
+
+    flags_a = _shared_metric_flags(bundle_a["metrics"])
+    flags_b = _shared_metric_flags(bundle_b["metrics"])
+    flag_changes = [
+        {
+            "path": path,
+            "a": flags_a[path],
+            "b": flags_b[path],
+            "changed": flags_a[path] != flags_b[path],
+        }
+        for path in sorted(set(flags_a) & set(flags_b))
+    ]
+
+    return {
+        "api": BUNDLE_API,
+        "schema": "h3_icr_validation_result_comparison/v1",
+        "bundle_id_a": bundle_a["bundle_id"],
+        "bundle_id_b": bundle_b["bundle_id"],
+        "manifest_comparison": manifest_report,
+        "comparable": bool(manifest_report["compatible"]),
+        "locks_identical": bool(manifest_report["locks_identical"]),
+        "scalar_metric_deltas": scalar_deltas,
+        "flag_changes": flag_changes,
+        "winner": None,
+        "winner_reason": "automatic latent metrics do not assign a global quality winner",
+    }

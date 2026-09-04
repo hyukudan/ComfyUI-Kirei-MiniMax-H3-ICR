@@ -15,7 +15,6 @@ from .sparse_attention import (
     _HEAD_LOCAL_3D,
     _HEAD_SPATIAL,
     _HEAD_TEMPORAL,
-    _architecture,
     _branch_name,
     _digest,
     _get_flex_api,

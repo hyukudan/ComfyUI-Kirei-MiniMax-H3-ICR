@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import torch
 
 from h3_icr.validation import (
@@ -262,12 +260,6 @@ def test_strict_canonicalization_rejects_closure_state():
 
 
 def test_renderer_handle_includes_prior_schedule_configuration():
-    handle = {
-        "api": 1,
-        "config": SimpleNamespace(to_dict=lambda: {"prior_strength": 0.3}),
-        "prior_schedule": SimpleNamespace(to_dict=lambda: {"floor": 0.15, "power": 1.0}),
-    }
-    # Use small dataclass-like classes rather than repr-based objects.
     class Config:
         def __init__(self, payload):
             self.payload = payload

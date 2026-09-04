@@ -6,6 +6,8 @@ from h3_icr.runtime_tiling import (
     H3TiledRendererConfig,
     TiledRendererStats,
     _child_options_without_spectrum,
+    _payload_with_resized_keyframes,
+    _payload_with_tiled_keyframes,
     rewrite_tile_layout_global_positions,
 )
 from h3_icr.tiling import plan_spatial_tiles, target_patch_indices
@@ -65,16 +67,103 @@ def test_global_layout_rewrite_keeps_non_video_positions_and_slices_video_positi
     assert torch.equal(tile_layout.position_ids[4:], full.position_ids[4:][indices])
 
 
+def test_global_layout_rewrite_slices_keyframe_cond_rows_with_full_canvas_positions():
+    tile = plan_spatial_tiles(4, 6, tile_h=2, tile_w=4, overlap_h=0, overlap_w=0).tiles[-1]
+    full_cond_rows = 1 * (4 // 2) * (6 // 2)
+    full_video_rows = 2 * (4 // 2) * (6 // 2)
+    tile_cond_rows = 1 * (tile.height // 2) * (tile.width // 2)
+    tile_video_rows = 2 * (tile.height // 2) * (tile.width // 2)
+
+    full = SimpleNamespace(
+        segments=[
+            (0, 2, "text"),
+            (2, 2 + full_cond_rows, "cond"),
+            (2 + full_cond_rows, 4 + full_cond_rows, "audio"),
+            (4 + full_cond_rows, 4 + full_cond_rows + full_video_rows, "video"),
+        ],
+        position_ids=torch.arange(
+            (4 + full_cond_rows + full_video_rows) * 3, dtype=torch.float64
+        ).reshape(4 + full_cond_rows + full_video_rows, 3),
+    )
+    tile_layout = SimpleNamespace(
+        segments=[
+            (0, 2, "text"),
+            (2, 2 + tile_cond_rows, "cond"),
+            (2 + tile_cond_rows, 4 + tile_cond_rows, "audio"),
+            (4 + tile_cond_rows, 4 + tile_cond_rows + tile_video_rows, "video"),
+        ],
+        position_ids=torch.full(
+            (4 + tile_cond_rows + tile_video_rows, 3), -1.0, dtype=torch.float64
+        ),
+    )
+    keyframe = {"latent": torch.zeros(1, 24, 1, 4, 6), "resolved_frame_index": 0}
+    rewrite_tile_layout_global_positions(
+        full,
+        tile_layout,
+        latent_t=2,
+        full_h=4,
+        full_w=6,
+        tile=tile,
+        keyframes=[keyframe],
+    )
+
+    cond_indices = target_patch_indices(1, 4, 6, tile)
+    assert torch.equal(
+        tile_layout.position_ids[2 : 2 + tile_cond_rows],
+        full.position_ids[2 : 2 + full_cond_rows][cond_indices],
+    )
+    full_video_start = 4 + full_cond_rows
+    tile_video_start = 4 + tile_cond_rows
+    video_indices = target_patch_indices(2, 4, 6, tile)
+    assert torch.equal(
+        tile_layout.position_ids[tile_video_start:],
+        full.position_ids[full_video_start:][video_indices],
+    )
+
+
+def test_keyframe_payloads_resize_crop_and_rebuild_condition_latents():
+    keyframe_video = torch.arange(1 * 24 * 1 * 4 * 6, dtype=torch.float32).reshape(1, 24, 1, 4, 6)
+    keyframe_audio = torch.ones(1, 32, 2, 5)
+    ref_video = torch.zeros(1, 24, 1, 2, 2)
+    payload = {
+        "keyframes": [
+            {
+                "resolved_frame_index": 0,
+                "latent": keyframe_video,
+                "audio_latent": keyframe_audio,
+            }
+        ],
+        "refs": [{"kind": "image", "latent": ref_video}],
+        "cond_video_latents": [torch.full_like(keyframe_video, -1.0)],
+        "cond_audio_latents": [],
+    }
+
+    prior = _payload_with_resized_keyframes(payload, 2, 4)
+    assert prior["keyframes"][0]["latent"].shape[-2:] == (2, 4)
+    assert prior["cond_video_latents"][0].shape[-2:] == (2, 4)
+    assert prior["cond_video_latents"][1] is ref_video
+    assert prior["cond_audio_latents"][0] is keyframe_audio
+
+    tile = plan_spatial_tiles(4, 6, tile_h=2, tile_w=4, overlap_h=0, overlap_w=0).tiles[-1]
+    tiled = _payload_with_tiled_keyframes(payload, tile)
+    expected = keyframe_video[..., tile.y0 : tile.y1, tile.x0 : tile.x1]
+    assert torch.equal(tiled["keyframes"][0]["latent"], expected)
+    assert tiled["cond_video_latents"][0] is tiled["keyframes"][0]["latent"]
+    assert tiled["cond_video_latents"][1] is ref_video
+    assert tiled["cond_audio_latents"][0] is keyframe_audio
+
+
 def test_stats_report_plan_counts():
     stats = TiledRendererStats()
     plan = plan_spatial_tiles(72, 128, tile_h=48, tile_w=64, overlap_h=16, overlap_w=16)
-    stats.record_plan(plan, latent_t=37, spectrum_prior=True)
+    stats.record_plan(plan, latent_t=37, spectrum_prior=True, keyframe_count=2)
     report = stats.to_dict()
     assert report["prior_calls"] == 1
     assert report["tile_model_calls"] == 6
     assert report["spectrum_prior_calls"] == 1
     assert report["last_full_video_tokens"] == 85248
     assert report["last_tile_video_tokens"] == 28416
+    assert report["last_keyframe_count"] == 2
 
 
 def test_tiled_wrapper_runs_one_global_prior_then_actual_tiles(monkeypatch):

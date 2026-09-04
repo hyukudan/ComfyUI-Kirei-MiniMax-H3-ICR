@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 
-from .attention_profile_v2 import patch_attention_profiler_v2, propose_attention_policy_v2
+from .attention_policy_v3 import propose_attention_policy_v3
+from .attention_profile_v2 import patch_attention_profiler_v2
 
 
 class H3ICRAttentionProfiler:
@@ -26,8 +27,8 @@ class H3ICRAttentionProfiler:
     CATEGORY = "Kirei/MiniMax H3/ICR/Research"
     DESCRIPTION = (
         "M5 passive calibration profiler. Samples normalized H3 Q/K by layer, sigma and modality, "
-        "and adds exact spatial/temporal/far QK pair evidence for target-video heads. It delegates "
-        "to the original attention backend unchanged and never enables sparse attention."
+        "adds exact spatial/temporal/far QK pair evidence, and binds every M4/dense branch to one "
+        "packed topology. It delegates to the original attention backend unchanged."
     )
 
     def patch(
@@ -49,7 +50,7 @@ class H3ICRAttentionProfiler:
             max_buckets=max_buckets,
             model_id=model_id,
         )
-        return patched, {"api": 2, "runtime": runtime}
+        return patched, {"api": 3, "runtime": runtime}
 
 
 class H3ICRAttentionProfileReport:
@@ -68,7 +69,7 @@ class H3ICRAttentionProfileReport:
         if runtime is None or not hasattr(runtime, "report"):
             raise TypeError("invalid H3 ICR attention profile handle")
         report = runtime.report()
-        proposal = propose_attention_policy_v2(report)
+        proposal = propose_attention_policy_v3(report)
         return (
             json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2),
             json.dumps(proposal, ensure_ascii=False, sort_keys=True, indent=2),

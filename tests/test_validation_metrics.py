@@ -5,6 +5,7 @@ import torch
 from h3_icr.validation import build_validation_manifest
 from h3_icr.validation_metrics import (
     build_validation_result_bundle,
+    compare_validation_result_bundles,
     evaluate_latent_output,
     validate_bundle_integrity,
     validate_metrics_integrity,
@@ -42,6 +43,24 @@ def _base():
     video = torch.randn(1, 24, 2, 4, 4)
     audio = torch.randn(1, 32, 2, 6)
     return video, audio
+
+
+def _manifest(video, audio, *, arm, sigmas=None, arm_settings=None):
+    return build_validation_manifest(
+        experiment_name="bundle-compare",
+        comparison_group="m3-arm",
+        arm=arm,
+        model=FakeModel(),
+        base_latent={"samples": (video, audio)},
+        positive=[[torch.zeros(1, 1, 2), {}]],
+        negative=None,
+        noise=FakeNoise(),
+        sampler=FakeSampler(),
+        sigmas=sigmas if sigmas is not None else torch.tensor([0.5, 0.0]),
+        locked_settings={"target": [64, 64]},
+        arm_settings=arm_settings or {},
+        backend=_backend(),
+    )
 
 
 def test_identical_output_has_zero_base_error_and_exact_audio():
@@ -92,6 +111,16 @@ def test_audio_change_is_detected_exactly():
     assert metrics["audio"]["max_abs"] >= 0.009
 
 
+def test_audio_shape_mismatch_uses_json_safe_null_diagnostics():
+    video, audio = _base()
+    changed_audio = audio[..., :-1].clone()
+    metrics = evaluate_latent_output((video, changed_audio), (video, audio))
+    assert metrics["audio"]["shape_equal"] is False
+    assert metrics["audio"]["exact"] is False
+    assert metrics["audio"]["rmse"] is None
+    assert metrics["audio"]["max_abs"] is None
+
+
 def test_m4_seam_diagnostic_detects_strong_internal_boundary():
     video = torch.zeros(1, 24, 2, 8, 12)
     video[..., 6:] = 1.0
@@ -115,21 +144,7 @@ def test_m4_seam_diagnostic_detects_strong_internal_boundary():
 
 def test_validation_bundle_is_stable_and_binds_manifest_to_metrics():
     video, audio = _base()
-    manifest = build_validation_manifest(
-        experiment_name="bundle-test",
-        comparison_group="control",
-        arm="A",
-        model=FakeModel(),
-        base_latent={"samples": (video, audio)},
-        positive=[[torch.zeros(1, 1, 2), {}]],
-        negative=None,
-        noise=FakeNoise(),
-        sampler=FakeSampler(),
-        sigmas=torch.tensor([0.5, 0.0]),
-        locked_settings={"target": [64, 64]},
-        arm_settings={},
-        backend=_backend(),
-    )
+    manifest = _manifest(video, audio, arm="A")
     metrics = evaluate_latent_output((video.clone(), audio.clone()), (video, audio))
     first = build_validation_result_bundle(
         manifest,
@@ -148,3 +163,45 @@ def test_validation_bundle_is_stable_and_binds_manifest_to_metrics():
     assert first["metrics_id"] == metrics["metrics_id"]
     assert len(first["bundle_id"]) == 64
     validate_bundle_integrity(first)
+
+
+def test_bundle_comparator_reports_controlled_metric_delta_without_winner():
+    video, audio = _base()
+    manifest_a = _manifest(video, audio, arm="control", arm_settings={"m3": {"strength": 0.0}})
+    manifest_b = _manifest(video, audio, arm="treatment", arm_settings={"m3": {"strength": 0.2}})
+    metrics_a = evaluate_latent_output((video.clone(), audio.clone()), (video, audio))
+    output_b = video.clone()
+    output_b[..., 0, 0] += 0.2
+    metrics_b = evaluate_latent_output((output_b, audio.clone()), (video, audio))
+    bundle_a = build_validation_result_bundle(manifest_a, metrics_a)
+    bundle_b = build_validation_result_bundle(manifest_b, metrics_b)
+    report = compare_validation_result_bundles(
+        bundle_a,
+        bundle_b,
+        allowed_differences="arm.settings.m3.strength",
+    )
+    assert report["comparable"] is True
+    assert report["locks_identical"] is True
+    measurement = next(
+        row for row in report["scalar_metric_deltas"]
+        if row["path"] == "$.base_compatibility.measurement_rmse"
+    )
+    assert measurement["delta_b_minus_a"] > 0.0
+    assert measurement["direction_hint"] == "lower_is_more_base_compatible"
+    assert report["winner"] is None
+
+
+def test_bundle_comparator_refuses_hidden_sigma_change():
+    video, audio = _base()
+    manifest_a = _manifest(video, audio, arm="A", sigmas=torch.tensor([0.5, 0.0]))
+    manifest_b = _manifest(video, audio, arm="B", sigmas=torch.tensor([0.6, 0.0]))
+    metrics = evaluate_latent_output((video.clone(), audio.clone()), (video, audio))
+    bundle_a = build_validation_result_bundle(manifest_a, metrics)
+    bundle_b = build_validation_result_bundle(manifest_b, metrics)
+    report = compare_validation_result_bundles(bundle_a, bundle_b, allowed_differences="arm.settings")
+    assert report["comparable"] is False
+    assert report["locks_identical"] is False
+    assert any(
+        row["path"].startswith("$.locks.sigmas")
+        for row in report["manifest_comparison"]["unexpected_differences"]
+    )

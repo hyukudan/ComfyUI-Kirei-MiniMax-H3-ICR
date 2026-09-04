@@ -60,7 +60,7 @@ Implemented on the experimental branch:
 - one canonical packed topology per branch per calibration run
 - topology descriptor includes native target signature plus ordered segment kinds/row counts
 - architecture, topology and complete-profile SHA-256 fingerprints
-- proposal-only v2 head classification using both modal mass and exact-pair evidence
+- proposal-only head classification using both modal mass and exact-pair evidence
 
 Remaining before M5a is accepted:
 - collect real profiles across FL2VA / Hybrid / Ref2VA
@@ -80,7 +80,7 @@ Implemented on the experimental branch:
 - all text/reference/keyframe/audio and non-target-video links remain global/dense
 - mandatory dense sigma tail
 - dense fallback on non-CUDA, external masks, incomplete/dense policies or low measured block sparsity
-- topology/layer/policy/device BlockMask cache reused across sigma coordinates
+- topology/layer/policy/device BlockMask cache
 - modern PyTorch `BACKEND="TRITON"` selection with legacy `FORCE_USE_FLEX_ATTENTION` compatibility
 - runtime telemetry for sparse calls, all fallback classes, mask builds/cache hits and measured BlockMask sparsity
 
@@ -91,9 +91,28 @@ Remaining before M5b is accepted:
 - actual BlockMask sparsity per layer/head topology
 - topology-fallback and policy-fallback rates
 - tune dense-tail sigma and local radii from decoded media rather than statistics alone
-- evaluate sigma-specific policies only after static topology-bound policies pass parity
 - complete decoded-video parity before any speedup/default claim
 - consider alternative sparse kernels only if FlexAttention cannot deliver a useful measured gain on the target GPUs
+
+## M5c — topology + sigma-domain policy v3 — implemented experimentally
+Implemented as an optional policy layer over M5a/M5b:
+- retains the v2 aggregate layer policy for analysis
+- emits explicit `branch + topology digest + sigma + layer` domains from existing profiler buckets
+- preserves exact QK pair evidence independently inside every sigma domain
+- Flex runtime selects the nearest calibrated sigma independently per layer
+- configurable `max_policy_sigma_distance`, default 0.03
+- sigma-domain miss -> empty sparse layer map -> native dense fallback
+- no categorical interpolation between unobserved sigma coordinates
+- aggregate v2 layer map restored after every model call
+- BlockMask reuse remains possible across sigmas only when the effective per-head policy codes are identical
+- sigma-domain match/fallback and distance telemetry
+
+Remaining before M5c is accepted:
+- compare v2 static topology-bound policy against v3 sigma-domain policy on the same decoded-media benchmark
+- determine useful sigma sampling density from real H3 schedules
+- measure how frequently v3 falls back to dense at the default 0.03 tolerance
+- tune tolerance only from parity/speed measurements, not to maximize sparse-call rate
+- verify that sigma-specific policies improve parity or the speed/quality operating point before preferring v3 over v2
 
 ## M6 — BaseVideo Adapter + detail LoRA
 - frozen H3 backbone

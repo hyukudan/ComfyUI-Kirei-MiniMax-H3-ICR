@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 
 import torch
@@ -5,6 +6,7 @@ import torch
 from h3_icr.base_video_adapter import (
     BaseVideoAdapterBlockPatch,
     create_zero_init_base_adapter_provider,
+    infer_m4_tile_region_from_global_positions,
     parse_injection_blocks,
     patch_base_video_adapter,
 )
@@ -57,6 +59,38 @@ def _layout(video_rows):
             (2, 4, "audio"),
             (4, 4 + video_rows, "video"),
         ],
+    )
+
+
+def _axis(dim, other, patch=2):
+    area = math.sqrt(dim * other)
+    ratio = dim / area
+    n = dim // patch
+    return (torch.arange(n, dtype=torch.float64) * (ratio / n) + (1.0 - ratio) / 2.0) * 32.0
+
+
+def _global_tile_layout(*, full_h=8, full_w=12, y0=4, x0=6, tile_h=4, tile_w=6, latent_t=2):
+    h_axis = _axis(full_h, full_w)
+    w_axis = _axis(full_w, full_h)
+    ys = h_axis[y0 // 2 : (y0 + tile_h) // 2]
+    xs = w_axis[x0 // 2 : (x0 + tile_w) // 2]
+    hh, ww = torch.meshgrid(ys, xs, indexing="ij")
+    frame = torch.stack((hh.reshape(-1), ww.reshape(-1)), dim=-1)
+    video_positions = []
+    for t in range(latent_t):
+        pos = torch.empty(frame.shape[0], 3, dtype=torch.float64)
+        pos[:, 0] = 10.0 + t
+        pos[:, 1:] = frame
+        video_positions.append(pos)
+    video_positions = torch.cat(video_positions)
+    prefix = torch.zeros(4, 3, dtype=torch.float64)
+    return SimpleNamespace(
+        segments=[
+            (0, 2, "text"),
+            (2, 4, "audio"),
+            (4, 4 + video_positions.shape[0], "video"),
+        ],
+        position_ids=torch.cat((prefix, video_positions)),
     )
 
 
@@ -143,7 +177,18 @@ def test_trained_flag_exercises_dense_static_dynamic_path_but_zero_out_stays_exa
     assert runtime.stats.static_cache_builds == 1
 
 
-def test_m4_hr_tile_fails_safe_instead_of_using_whole_base_scene():
+def test_m4_global_mmrope_recovers_full_canvas_and_exact_tile_bounds():
+    layout = _global_tile_layout()
+    region = infer_m4_tile_region_from_global_positions(
+        layout,
+        latent_t=2,
+        tile_h=4,
+        tile_w=6,
+    )
+    assert region == (8, 12, 4, 8, 6, 12)
+
+
+def test_m4_hr_tile_uses_aligned_base_region_and_keeps_zero_init_parity():
     model = FakeModelPatcher(hidden_size=16, layers=4)
     provider = create_zero_init_base_adapter_provider(model, injection_blocks="1", adapter_dim=32)
     provider.trained = True
@@ -158,13 +203,15 @@ def test_m4_hr_tile_fails_safe_instead_of_using_whole_base_scene():
         patch = patched.model_options["transformer_options"]["patches_replace"]["dit"][("double_block", 1)]
         original = torch.randn(16, 16)
         output = patch(
-            {"img": original, "layout": _layout(12)},
+            {"img": original, "layout": _global_tile_layout()},
             {"original_block": lambda value: {"img": value["img"].clone()}},
         )
     finally:
         runtime.end_call()
     assert torch.equal(output["img"], original)
-    assert runtime.stats.m4_tile_fallback_blocks == 1
+    assert runtime.stats.m4_tile_aligned_blocks == 1
+    assert runtime.stats.tile_region_inferences == 1
+    assert runtime.stats.static_cache_builds == 1
 
 
 def test_provider_architecture_fingerprint_rejects_different_h3_width():

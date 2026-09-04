@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -333,9 +333,6 @@ class BaseVideoAdapterRuntime:
         active = self._active
         if active is None:
             raise RuntimeError("BaseVideo Adapter has no active H3 call")
-        # M4 HR tiles need an explicit global tile rectangle so the Base stream
-        # can crop the matching region. Until that metadata contract lands, do
-        # not feed the complete Base scene into every tile.
         if active.branch == "m4_hr_tile":
             return None
         if int(self.base_video.shape[2]) != active.latent_t:
@@ -441,9 +438,6 @@ class BaseVideoAdapterBlockPatch:
             self.previous.cleanup()
 
     def models(self):
-        # Zero-init scaffold has no separately-managed checkpoint yet. A trained
-        # provider loader must wrap adapter weights in a ComfyUI ModelPatcher and
-        # expose it here before trained checkpoints are considered production-safe.
         if hasattr(self.previous, "models"):
             return self.previous.models()
         return []

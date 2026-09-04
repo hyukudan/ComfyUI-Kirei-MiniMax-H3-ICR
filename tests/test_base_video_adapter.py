@@ -191,6 +191,7 @@ def test_block_patch_preserves_existing_patch_chain():
 
     model = FakeModelPatcher(hidden_size=16, layers=4)
     provider = create_zero_init_base_adapter_provider(model, injection_blocks="1", adapter_dim=32)
+    assert provider.config.injection_blocks == (1,)
     runtime = SimpleNamespace(
         after_block=lambda block_index, args, out: (calls.append(("adapter", block_index)) or out),
         to=lambda value: None,

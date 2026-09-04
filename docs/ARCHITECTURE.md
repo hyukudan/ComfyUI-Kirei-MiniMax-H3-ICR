@@ -60,9 +60,9 @@ M4 invariants:
 - Spectrum may remain on the stable global topology while HR tile branches are forced actual;
 - EasyCache currently fails closed because tile-local cache semantics have not been defined.
 
-## M5 calibration path
+## M5 calibration and sparse execution path
 
-M5 adds measurement hooks around native H3 attention without changing its output:
+M5 first measures native H3 attention without changing its output:
 
 ```text
 native H3 diffusion call
@@ -76,7 +76,48 @@ native H3 diffusion call
                  +--> delegate to original attention backend unchanged
 ```
 
-The profiler never constructs the full SxS attention matrix. It records sampled cross-modal mass and target-video locality by layer/head/sigma, plus architecture/profile fingerprints. A proposal-only classifier can suggest candidate local/spatial/temporal/global heads, but no sparse execution is enabled by M5 measurement code.
+The profiler never constructs the full SxS analysis matrix. It records sampled cross-modal mass and target-video locality by layer/head/sigma, plus architecture/profile fingerprints. A proposal-only classifier identifies candidate local-3D, spatial-window, temporal-stripe and dense/global heads.
+
+The experimental execution path consumes that fingerprinted proposal:
+
+```text
+profile + proposal
+      |
+      +--> proposal/profile/architecture validation
+      |
+      v
+active PackedLayout + sigma + layer
+      |
+      +--> dense tail / fallback? ---- yes --> original ComfyUI attention
+      |
+      no
+      v
+head-specific target-video policy
+      |
+      +--> all text/ref/audio K/V remain global
+      +--> dense/global heads remain fully dense
+      +--> selected target-video heads use local 3D / spatial / temporal patterns
+      |
+      v
+PyTorch FlexAttention BlockMask
+      |
+      +--> reject if measured block sparsity is below threshold
+      |
+      v
+real block-sparse attention kernel [experimental]
+```
+
+M5 sparse invariants:
+
+- a dense QxK mask does not count as sparse execution;
+- policy and optional source-profile digests are verified before patching the MODEL;
+- the current native H3 architecture plus `model_id` must match the calibration fingerprint;
+- non-target-video queries remain dense;
+- sparse target-video queries retain complete access to text, visual conditions/references and audio context;
+- masks are topology-specific and cached separately for dense/M4-global/M4-tile sequence layouts;
+- late sigma steps always use the original dense attention path;
+- CPU, pre-existing attention masks, incomplete policies and low block sparsity fall back to dense attention;
+- `BlockMask.sparsity()` and fallback rates are telemetered.
 
 ## Why partial noise
 
@@ -85,7 +126,7 @@ The learned-upscaled clean latent is valuable only when the second pass starts b
 ## Non-claims
 
 - Kirei H3-ICR is not MiniMax H3-Regenerate-2K.
-- It does not implement MiniMax's private sparse-attention topology.
+- It does not reproduce MiniMax's private sparse-attention topology.
 - M4 has contract/unit coverage but still requires controlled decoded-media validation.
-- M5 currently measures and proposes candidate head classes; it does not enable a sparse kernel.
+- The M5 Flex path is a real block-sparse kernel integration, but it is experimental and has no accepted speed/quality claim until CUDA H3 benchmarking and decoded-media parity are complete.
 - Posterior-consistency gradients, BaseVideo Adapter, detail LoRA and distillation remain later milestones.

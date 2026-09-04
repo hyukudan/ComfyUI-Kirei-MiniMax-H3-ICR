@@ -39,25 +39,42 @@ Implemented on `feature/tiled-2k-fusion` / PR #1:
 - Spectrum retained only on the stable global-prior topology while tile calls are forced actual;
 - fail-closed geometry/topology rules and live telemetry.
 
-### M5 — attention calibration and sparse-kernel research
+### M5a — passive attention calibration v2
 
 Implemented on the experimental branch:
 
-- non-destructive normalized Q/K profiler by H3 layer, head, sigma and branch;
+- passive normalized Q/K profiler using ComfyUI's function-style `optimized_attention_override`;
 - bounded sampling without constructing a full S×S analysis matrix;
-- text / visual-condition / audio-condition / target-audio / target-video accounting;
-- target-video spatial, temporal and 3D-local concentration metrics;
+- importance-corrected Q→K mass between text, visual conditions, audio conditions, target audio and target video;
+- exact sampled target-video QK pairs for diagonal, spatial neighbor, temporal neighbor and far-video evidence;
+- per-head `spatial_minus_far` and `temporal_minus_far` margins;
+- branch labeling for `dense`, `m4_global_prior` and `m4_hr_tile`;
+- one canonical packed topology per branch and calibration run;
+- topology digest covering target signature plus ordered packed segment kinds/row counts;
 - architecture/profile SHA-256 fingerprints;
-- proposal-only per-head classification;
-- **experimental real block-sparse backend using PyTorch FlexAttention `BlockMask`**;
-- policy/architecture/profile fingerprint validation;
-- cross-modal context kept globally visible for sparse target-video heads;
-- head-specific local-3D, spatial-window and temporal-stripe masks;
-- mandatory dense sigma tail;
-- dense fallback when a policy, topology, device or sparsity gate is not satisfied;
-- BlockMask cache and actual block-sparsity telemetry.
+- proposal-only v2 per-head classification based on both modal mass and exact-pair evidence;
+- passive-equivalence tests proving that the profiler returns the wrapped attention output unchanged.
 
-The Flex backend is **not validated or enabled by default**. Its existence is not a speedup claim; CUDA wall time, VRAM and decoded-video parity must be measured first.
+A change in target geometry, text/audio length, reference-row layout or keyframe-row layout changes the topology digest. The profiler refuses to average two different topologies under the same branch name.
+
+### M5b — experimental real Flex sparse executor v2
+
+Also implemented on the experimental branch, but **not validated or enabled by default**:
+
+- real block-sparse execution through PyTorch `FlexAttention` + `BlockMask`;
+- v2 labels `local_3d_pair_candidate`, `spatial_pair_candidate` and `temporal_pair_candidate`, plus compatibility with the original proposal labels;
+- architecture/profile digest validation;
+- branch-specific packed-topology validation before sparse execution;
+- dense fallback when the runtime topology is outside calibration;
+- all cross-modal/non-target-video links remain globally visible;
+- head-specific local-3D, spatial-window and temporal-stripe masks only for target-video self-attention;
+- mandatory dense sigma tail;
+- dense fallback on CPU, existing external masks, missing/incomplete policies or insufficient measured block sparsity;
+- BlockMask cache keyed by topology/layer/policy/device but **not sigma**, so one safe mask is reused across denoising steps;
+- current PyTorch kernel selection uses `BACKEND="TRITON"` when the installed `FlexKernelOptions` supports the modern API, with `FORCE_USE_FLEX_ATTENTION` only as compatibility for older PyTorch releases;
+- telemetry for real sparse calls, dense-tail calls, topology/policy/runtime fallbacks, mask builds/cache hits and `BlockMask.sparsity()`.
+
+The existence of this code is **not a speedup or quality claim**. Real H3 CUDA wall time, VRAM and decoded-video parity must be measured before any sparse policy is accepted.
 
 ## Core architecture
 
@@ -90,22 +107,30 @@ H3 Base
                               |                           global LR + HR tiles
                               |                           full-canvas MM-RoPE
                               |                           HR keyframe remapping
+                              |                           sigma-aware LR prior
                               |                           per-step output fusion
                               +--------------------+--------------------+
                                                    |
                                                    v
                                              regenerated H3
 
-M5 research overlay
+M5a passive calibration
   PackedLayout + sigma + normalized Q/K
                   |
-             calibration profile
+      sampled modal mass + exact QK pair margins
                   |
-          fingerprint-bound policy
+       architecture + topology-bound profile
                   |
-       FlexAttention BlockMask [experimental]
+           proposal-only per-head policy
+
+M5b experimental execution
+        validated v2 proposal
                   |
-       dense tail / fallback when required
+         topology/architecture gate
+                  |
+      FlexAttention real BlockMask kernel
+                  |
+     dense tail / dense fallback when required
 ```
 
 ## Quality ranking
@@ -195,7 +220,7 @@ See [`docs/M4_TILED_2K_RENDERER.md`](docs/M4_TILED_2K_RENDERER.md).
 
 ## M5 attention workflow
 
-### 1. Profile
+### 1. Passive v2 calibration
 
 Patch a controlled run with:
 
@@ -204,8 +229,8 @@ Patch a controlled run with:
 
 The report produces:
 
-- complete calibration JSON;
-- proposal-only policy JSON.
+- complete v2 calibration JSON;
+- proposal-only v2 policy JSON.
 
 Default light-profile settings:
 
@@ -219,14 +244,16 @@ max buckets:            2048
 
 A full calibration can later use `layer_stride=1`.
 
+For each branch, keep target geometry and the complete packed conditioning topology fixed. If you want to benchmark another aspect ratio, duration, ref set or keyframe layout, create another calibration run rather than reusing the previous policy.
+
 ### 2. Experimental Flex sparse run
 
-The generated policy can be supplied to:
+Supply the generated v2 policy to:
 
 - **Kirei H3 ICR Flex Sparse Attention [M5 Experimental]**
 - **Kirei H3 ICR Flex Sparse Report**
 
-The backend validates the policy digest and current H3 architecture fingerprint. Supplying the original profile JSON adds source-profile verification.
+Supplying the original profile JSON adds full source-profile verification.
 
 Initial sparse settings:
 
@@ -243,13 +270,15 @@ Policy behavior:
 | Head classification | Target-video K/V | Text / refs / audio |
 | --- | --- | --- |
 | global / mixed | dense | dense |
-| local 3D | local T/Y/X | global |
-| spatial window | same T + local Y/X | global |
-| temporal stripe | local T at same Y/X | global |
+| local 3D pair candidate | local T/Y/X | global |
+| spatial pair candidate | same T + local Y/X | global |
+| temporal pair candidate | local T at same Y/X | global |
 
-Non-target-video queries stay dense. Late steps always return to the original ComfyUI attention path.
+The original `*_candidate` labels remain accepted for comparison with earlier profiles.
 
-PyTorch `BlockMask.sparsity()` is recorded so a configuration can demonstrate that blocks were actually skipped. If sparsity is too low, Kirei falls back to dense attention rather than claiming a sparse speedup.
+Non-target-video queries stay dense. Late steps always return to the original ComfyUI attention path. A topology mismatch also returns to dense rather than transferring a calibrated pattern to a new layout.
+
+PyTorch `BlockMask.sparsity()` is recorded so a configuration can demonstrate that blocks were actually skipped. If sparsity is too low, Kirei stays dense rather than claiming a sparse speedup.
 
 See [`docs/M5_ATTENTION_CALIBRATION.md`](docs/M5_ATTENTION_CALIBRATION.md) and [`docs/M5_FLEX_SPARSE_BACKEND.md`](docs/M5_FLEX_SPARSE_BACKEND.md).
 
@@ -266,6 +295,10 @@ M5 profiler and Flex sparse execution use ComfyUI's function-style `optimized_at
 ### EasyCache
 
 M4 currently rejects EasyCache because sharing cache state across incompatible tile topologies is unsafe.
+
+### PyTorch FlexAttention versions
+
+The executor detects the installed `FlexKernelOptions` contract. Newer PyTorch uses `BACKEND="TRITON"`; older releases fall back to the legacy `FORCE_USE_FLEX_ATTENTION` option when explicit Flex-kernel forcing is requested. The two options are never supplied together.
 
 ## Nodes
 
@@ -295,9 +328,12 @@ Before merging PR #1 we will validate Base H3-ICR, M4 and M5 together. At minimu
 - M4 2048×1152 constant and sigma-scheduled prior;
 - FL2VA / Hybrid 45-49 / Ref2VA where runtime permits;
 - M4 with and without verified HR keyframes;
-- profiler no-op/output-neutral control;
+- profiler passive/no-op output control;
+- separate calibration for every packed topology under test;
 - Flex sparse all-dense/fallback control;
+- topology-mismatch fallback control;
 - candidate sparse policies with measured BlockMask sparsity;
+- mask-build and mask-cache-hit rates;
 - peak VRAM and wall time, including first-use overhead separately;
 - complete decoded-video inspection for identity, objects, hands, faces, text, motion, flicker and tile boundaries.
 
@@ -320,15 +356,15 @@ GitHub Actions runs tests and Ruff on every push and pull request. Unit tests us
 - [`docs/RESEARCH.md`](docs/RESEARCH.md) — research map.
 - [`docs/RESEARCH_SURVEY_v1_2.md`](docs/RESEARCH_SURVEY_v1_2.md) — literature and public-implementation survey.
 - [`docs/M4_TILED_2K_RENDERER.md`](docs/M4_TILED_2K_RENDERER.md) — M4 design and validation gate.
-- [`docs/M5_ATTENTION_CALIBRATION.md`](docs/M5_ATTENTION_CALIBRATION.md) — M5 measurement design.
-- [`docs/M5_FLEX_SPARSE_BACKEND.md`](docs/M5_FLEX_SPARSE_BACKEND.md) — experimental real block-sparse backend.
+- [`docs/M5_ATTENTION_CALIBRATION.md`](docs/M5_ATTENTION_CALIBRATION.md) — M5 passive measurement and topology-binding design.
+- [`docs/M5_FLEX_SPARSE_BACKEND.md`](docs/M5_FLEX_SPARSE_BACKEND.md) — experimental topology-bound real block-sparse backend.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone gates.
 
 ## Next milestones
 
 1. combined decoded-media validation of Base H3-ICR + M4;
-2. real attention calibration on the target H3 backends and geometries;
-3. CUDA benchmark/parity gate for the Flex sparse backend;
+2. real v2 attention calibration on the exact H3 backends and packed topologies used in the benchmark;
+3. CUDA benchmark/parity gate for the topology-bound Flex sparse backend;
 4. posterior/measurement-consistency experiments;
 5. refine sparse policy by sigma/topology from real measurements;
 6. train the state-aware BaseVideo Adapter + detail LoRA only after the training-free teacher is characterized;

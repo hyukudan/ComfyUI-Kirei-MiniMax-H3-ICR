@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 
 import torch
@@ -12,7 +13,6 @@ from h3_icr.attention_profile_v2 import (
 
 
 def _layout():
-    # text=2, audio=2, video=2 temporal x (2x2 patches) = 8 rows
     return SimpleNamespace(
         seq_len=12,
         signature=(2, 2, 4, 4, 1),
@@ -93,23 +93,53 @@ def test_profiler_override_is_passive_and_records_metrics():
 
 
 def test_exact_pair_affinity_detects_spatial_neighbor_advantage_over_far_key():
+    layout = SimpleNamespace(
+        seq_len=36,
+        signature=(2, 2, 8, 8, 1),
+        segments=[
+            (0, 2, "text"),
+            (2, 4, "audio"),
+            (4, 36, "video"),
+        ],
+    )
     runtime = _runtime()
-    _begin(runtime)
-    q = torch.zeros(1, 1, 12, 4)
-    k = torch.zeros_like(q)
+    runtime.begin_call(
+        layout=layout,
+        sigma=0.5,
+        branch="dense",
+        latent_t=2,
+        latent_h=8,
+        latent_w=8,
+        patch_h=2,
+        patch_w=2,
+    )
 
-    # Target rows 4..11. Make each query and its adjacent spatial key share
-    # a positive first feature, while the deterministic far key is negative.
-    q[:, :, 4:12, 0] = 1.0
-    k[:, :, 4:12, 0] = 1.0
-    # Far pairing for this 2x2x2 grid maps to the opposite temporal/spatial
-    # region; make the second half negative to ensure a positive local margin.
-    k[:, :, 8:12, 0] = -1.0
+    q = torch.zeros(1, 1, 36, 6)
+    k = torch.zeros_like(q)
+    row = 4
+    for t in range(2):
+        for y in range(4):
+            for x in range(4):
+                feature = torch.tensor(
+                    [
+                        math.cos(2.0 * math.pi * x / 4.0),
+                        math.sin(2.0 * math.pi * x / 4.0),
+                        math.cos(2.0 * math.pi * y / 4.0),
+                        math.sin(2.0 * math.pi * y / 4.0),
+                        1.0 if t == 0 else -1.0,
+                        0.5,
+                    ],
+                    dtype=torch.float32,
+                )
+                q[0, 0, row] = feature
+                k[0, 0, row] = feature
+                row += 1
 
     pair = exact_video_pair_affinity(q, k, runtime)
     runtime.end_call()
 
     assert pair
+    assert pair["spatial_neighbor_score"][0] > pair["far_video_score"][0]
     assert pair["spatial_minus_far"][0] > 0.0
 
 

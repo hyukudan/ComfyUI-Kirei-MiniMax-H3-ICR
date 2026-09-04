@@ -33,6 +33,7 @@ Under active development on `feature/tiled-2k-fusion` / PR #1:
 - overlapping high-resolution target-video tiles;
 - model-output fusion **during every H3 evaluation**, not final RGB stitching;
 - weighted least-squares fusion against the global LR prior;
+- sigma-aware prior scheduling: strong structure lock near the start of pass 2, weaker prior near sigma 0 for late detail synthesis;
 - exact full-canvas MM-RoPE target coordinates inside every HR tile;
 - global text, references and audio on every branch;
 - Spectrum runtime retained only on the stable global prior branch while HR tile calls are forced actual;
@@ -77,6 +78,8 @@ H3 Base generation
                               |                                         |
                     per-step fidelity                global LR prior + HR tiles
                               |                         + global MM-RoPE coords
+                              |                         + HR keyframe remapping
+                              |                         + sigma-aware prior decay
                               |                         + per-step output fusion
                               +--------------------+--------------------+
                                                    |
@@ -151,10 +154,41 @@ current HR noisy video
 The fusion is performed at the same diffusion coordinate:
 
 ```text
-y = (sum_i w_i * tile_i + lambda * prior_hr) / (sum_i w_i + lambda)
+y = (sum_i w_i * tile_i + lambda(sigma) * prior_hr)
+    / (sum_i w_i + lambda(sigma))
 ```
 
 This is deliberately **not** a final-frame seam blend.
+
+### Prior schedule
+
+A constant global-prior weight is useful for structure, but it can suppress the high-frequency freedom we want from late H3 steps. M4 therefore exposes an optional structure-first schedule:
+
+```text
+m(sigma) = floor + (1 - floor) * (sigma / sigma_start)^power
+lambda(sigma) = prior_strength * m(sigma)
+```
+
+Recommended initial values:
+
+```text
+prior_strength:       0.30
+prior_schedule_floor: 0.15
+prior_schedule_power: 1.0
+```
+
+At the start of the second pass the renderer uses the full configured prior strength. Toward sigma 0, the regularizer approaches `prior_strength * floor`, leaving more freedom for H3 to synthesize microdetail while retaining a small global anchor.
+
+The schedule is a separate patch on purpose, so validation can compare constant-prior and scheduled-prior runs without changing the underlying tiled renderer.
+
+Recommended M4 node order:
+
+```text
+MODEL
+  -> Kirei H3 ICR Tiled 2K Patch
+  -> Kirei H3 ICR Tiled Prior Schedule
+  -> Kirei H3 ICR Regenerate
+```
 
 ### Global MM-RoPE coordinates
 
@@ -185,12 +219,14 @@ This prepares the renderer for sparse HR anchor experiments inspired by video-SR
 ### Initial 2K laboratory preset
 
 ```text
-target:             2048 x 1152
-tile:               1024 x 768
-requested overlap:  256 x 256
-global prior:        H3 Base latent geometry
-prior strength:     0.30
-max tiles:           16
+target:               2048 x 1152
+tile:                 1024 x 768
+requested overlap:    256 x 256
+global prior:          H3 Base latent geometry
+prior strength:       0.30
+prior schedule floor: 0.15
+prior schedule power: 1.0
+max tiles:             16
 ```
 
 For a typical 124-frame H3 clip, the full 2048x1152 target is about **85,248 target video tokens** before text, references and audio. A 1024x768 tile is about **28,416 target video tokens**. The initial plan normally uses six HR tiles plus one global LR call per H3 model evaluation.
@@ -224,9 +260,10 @@ EasyCache is currently rejected by M4. Tile-local cache semantics have not been 
 ### M4 experimental
 
 - **Kirei H3 ICR Tiled 2K Patch [Experimental]** — patches a native H3 `MODEL` with global-LR + tiled-HR model-output rendering.
-- **Kirei H3 ICR Tiled 2K Report** — exposes live tile/prior/token/keyframe telemetry.
+- **Kirei H3 ICR Tiled Prior Schedule [Experimental]** — decays the global prior regularization from structure-first to detail-friendly as sigma decreases.
+- **Kirei H3 ICR Tiled 2K Report** — exposes live tile/prior/token/keyframe/prior-schedule telemetry.
 
-The tiled patch is applied to the `MODEL` before **Kirei H3 ICR Regenerate**.
+The tiled patch is applied first, the optional prior schedule second, and the resulting `MODEL` is then passed to **Kirei H3 ICR Regenerate**.
 
 ## Companion integration
 
@@ -242,10 +279,12 @@ The Hybrid backend is intentionally external. This repository consumes the resul
 The first combined validation should compare:
 
 - dense H3-ICR around ~1 MP;
-- M4 2048x1152 with the same Base video and conditioning;
+- M4 2048x1152 with constant prior;
+- M4 2048x1152 with sigma-aware prior schedule;
 - FL2VA, Hybrid 45-49 and Ref2VA arms where runtime cost permits;
 - M4 with and without verified HR keyframes;
-- multiple `prior_strength` values around the initial `0.30` setting.
+- multiple `prior_strength` values around `0.30`;
+- schedule floors around `0.10-0.25` and powers around `0.5-2.0`.
 
 Inspect the complete video for:
 
@@ -283,7 +322,7 @@ GitHub Actions runs the unit suite and Ruff on every push and pull request. The 
 Current order:
 
 1. validate Base H3-ICR backend matrix on decoded media;
-2. validate M4 global-LR + tiled-HR 2K rendering and HR keyframes;
+2. validate M4 global-LR + tiled-HR 2K rendering, sigma-aware prior scheduling and HR keyframes;
 3. add measurement-consistency / posterior-consistency experiments;
 4. profile dense H3 attention by layer, head, timestep and modality;
 5. add calibrated real sparse kernels with explicit fallback;

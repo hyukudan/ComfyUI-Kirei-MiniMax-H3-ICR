@@ -104,7 +104,7 @@ def test_parse_injection_blocks_is_sorted_unique_and_range_checked():
         raise AssertionError("out-of-range adapter block must fail")
 
 
-def test_zero_init_adapter_module_returns_exact_zero_residual():
+def test_zero_init_adapter_module_has_independent_exact_zero_heads():
     model = FakeModelPatcher(hidden_size=16, layers=4)
     provider = create_zero_init_base_adapter_provider(
         model,
@@ -114,34 +114,60 @@ def test_zero_init_adapter_module_returns_exact_zero_residual():
     module = provider.module
     dynamic = torch.randn(12, 16)
     static = torch.randn(12, 96)
-    residual = module(
+    residual1 = module(
         dynamic,
         static,
+        block_index=1,
         latent_t=2,
         patch_grid_h=2,
         patch_grid_w=3,
         structure_gate=0.75,
     )
+    residual3 = module(
+        dynamic,
+        static,
+        block_index=3,
+        latent_t=2,
+        patch_grid_h=2,
+        patch_grid_w=3,
+        structure_gate=0.75,
+    )
+    assert set(module.out_proj) == {"1", "3"}
+    assert module.out_proj["1"] is not module.out_proj["3"]
     assert module.output_is_zero_initialized()
-    assert torch.equal(residual, torch.zeros_like(residual))
+    assert torch.equal(residual1, torch.zeros_like(residual1))
+    assert torch.equal(residual3, torch.zeros_like(residual3))
     assert provider.trained is False
+
+
+def test_adapter_rejects_unconfigured_block_head():
+    model = FakeModelPatcher(hidden_size=16, layers=4)
+    module = create_zero_init_base_adapter_provider(model, injection_blocks="1", adapter_dim=32).module
+    try:
+        module(
+            torch.randn(12, 16),
+            torch.randn(12, 96),
+            block_index=2,
+            latent_t=2,
+            patch_grid_h=2,
+            patch_grid_w=3,
+            structure_gate=0.5,
+        )
+    except ValueError as exc:
+        assert "no configured residual head" in str(exc)
+    else:
+        raise AssertionError("unconfigured M6 block must fail")
 
 
 def test_apply_registers_selected_blocks_and_zero_init_scaffold_is_noop():
     model = FakeModelPatcher(hidden_size=16, layers=4)
-    provider = create_zero_init_base_adapter_provider(
-        model,
-        injection_blocks="1,3",
-        adapter_dim=32,
-    )
+    provider = create_zero_init_base_adapter_provider(model, injection_blocks="1,3", adapter_dim=32)
     base = torch.randn(1, 24, 2, 4, 6)
     patched, runtime = patch_base_video_adapter(model, base, provider)
-
     transformer = patched.model_options["transformer_options"]
     replacements = transformer["patches_replace"]["dit"]
     assert set(replacements) == {("double_block", 1), ("double_block", 3)}
     assert "h3_icr_base_video_adapter" in transformer["wrappers"]["diffusion_model"]
-
     args = {"img": torch.randn(16, 16), "layout": _layout(12)}
     patch = replacements[("double_block", 1)]
     output = patch(args, {"original_block": lambda value: {"img": value["img"].clone()}})
@@ -149,13 +175,9 @@ def test_apply_registers_selected_blocks_and_zero_init_scaffold_is_noop():
     assert runtime.stats.zero_init_bypass_blocks == 1
 
 
-def test_trained_flag_exercises_dense_static_dynamic_path_but_zero_out_stays_exact():
+def test_trained_flag_exercises_static_dynamic_path_but_zero_head_stays_exact():
     model = FakeModelPatcher(hidden_size=16, layers=4)
-    provider = create_zero_init_base_adapter_provider(
-        model,
-        injection_blocks="1",
-        adapter_dim=32,
-    )
+    provider = create_zero_init_base_adapter_provider(model, injection_blocks="1", adapter_dim=32)
     provider.trained = True
     base = torch.randn(1, 24, 2, 4, 6)
     patched, runtime = patch_base_video_adapter(model, base, provider)
@@ -170,7 +192,6 @@ def test_trained_flag_exercises_dense_static_dynamic_path_but_zero_out_stays_exa
         )
     finally:
         runtime.end_call()
-
     assert torch.equal(output["img"], original)
     assert runtime.stats.applied_blocks == 1
     assert runtime.stats.residual_rms_max == 0.0
@@ -179,12 +200,7 @@ def test_trained_flag_exercises_dense_static_dynamic_path_but_zero_out_stays_exa
 
 def test_m4_global_mmrope_recovers_full_canvas_and_exact_tile_bounds():
     layout = _global_tile_layout()
-    region = infer_m4_tile_region_from_global_positions(
-        layout,
-        latent_t=2,
-        tile_h=4,
-        tile_w=6,
-    )
+    region = infer_m4_tile_region_from_global_positions(layout, latent_t=2, tile_h=4, tile_w=6)
     assert region == (8, 12, 4, 8, 6, 12)
 
 
@@ -246,9 +262,6 @@ def test_block_patch_preserves_existing_patch_chain():
     )
     patch = BaseVideoAdapterBlockPatch(runtime, 1, Previous())
     original = torch.zeros(4, 16)
-    out = patch(
-        {"img": original},
-        {"original_block": lambda value: {"img": value["img"].clone()}},
-    )
+    out = patch({"img": original}, {"original_block": lambda value: {"img": value["img"].clone()}})
     assert torch.equal(out["img"], torch.full_like(original, 2.0))
     assert calls == ["previous", ("adapter", 1)]

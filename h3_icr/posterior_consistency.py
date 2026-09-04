@@ -121,8 +121,6 @@ def posterior_measurement_step(
         probe = high_clean.detach().to(dtype=torch.float32).requires_grad_(True)
         measured = _area_downsample(probe, low.shape[-2], low.shape[-1])
         residual = measured - low
-        # Sum per sample rather than a global mean so the gradient direction is
-        # the true adjoint of the measurement residual; normalization follows below.
         loss = 0.5 * residual.square().sum()
         (gradient,) = torch.autograd.grad(loss, probe, create_graph=False, retain_graph=False)
 
@@ -198,7 +196,11 @@ def patch_posterior_consistency(
             stats.record(applied=False)
             return denoised
 
-        if getattr(denoised, "is_nested", False) or getattr(denoised, "tensors", None) is not None:
+        if (
+            isinstance(denoised, (tuple, list))
+            or getattr(denoised, "is_nested", False)
+            or getattr(denoised, "tensors", None) is not None
+        ):
             video, audio = unwrap_av(denoised)
             corrected, summary = apply_video(video)
             stats.record(

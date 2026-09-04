@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from .contracts import unwrap_av
+from .prior_schedule import patch_tiled_prior_schedule
 from .runtime_tiling import patch_tiled_renderer
 
 
@@ -28,8 +29,8 @@ class H3ICRTiled2KPatch:
     CATEGORY = "Kirei/MiniMax H3/ICR"
     DESCRIPTION = (
         "Patch native MiniMax H3 with the experimental M4 global-LR + tiled-HR renderer. "
-        "Predictions are fused in model-output space every evaluation while target MM-RoPE coordinates "
-        "remain those of the full canvas. M4-v0 intentionally rejects target-grid keyframes and EasyCache."
+        "Predictions are fused in model-output space every evaluation while target and HR-keyframe "
+        "MM-RoPE coordinates remain those of the full canvas. EasyCache is intentionally rejected."
     )
 
     def patch(
@@ -71,6 +72,39 @@ class H3ICRTiled2KPatch:
         return patched, renderer
 
 
+class H3ICRTiledPriorSchedule:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "renderer": ("H3_ICR_TILED_RENDERER",),
+                "floor": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "power": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.05}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL", "H3_ICR_TILED_RENDERER")
+    RETURN_NAMES = ("model", "renderer")
+    FUNCTION = "patch"
+    CATEGORY = "Kirei/MiniMax H3/ICR"
+    DESCRIPTION = (
+        "Make the M4 global-prior regularization structure-first: full configured strength near the "
+        "start of the H3 second pass, decaying toward a configurable floor as sigma approaches zero."
+    )
+
+    def patch(self, model, renderer, floor, power):
+        patched, config, stats = patch_tiled_prior_schedule(
+            model,
+            floor=float(floor),
+            power=float(power),
+        )
+        out = dict(renderer)
+        out["prior_schedule"] = config
+        out["prior_schedule_stats"] = stats
+        return patched, out
+
+
 class H3ICRTiled2KReport:
     @classmethod
     def INPUT_TYPES(cls):
@@ -85,20 +119,30 @@ class H3ICRTiled2KReport:
     def render(self, renderer):
         config = renderer.get("config")
         stats = renderer.get("stats")
+        prior_schedule = renderer.get("prior_schedule")
+        prior_schedule_stats = renderer.get("prior_schedule_stats")
         payload = {
             "api": int(renderer.get("api", 0)),
             "config": config.to_dict() if hasattr(config, "to_dict") else None,
             "stats": stats.to_dict() if hasattr(stats, "to_dict") else None,
+            "prior_schedule": (
+                prior_schedule.to_dict() if hasattr(prior_schedule, "to_dict") else None
+            ),
+            "prior_schedule_stats": (
+                prior_schedule_stats.to_dict() if hasattr(prior_schedule_stats, "to_dict") else None
+            ),
         }
         return (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2),)
 
 
 NODE_CLASS_MAPPINGS = {
     "H3ICRTiled2KPatch": H3ICRTiled2KPatch,
+    "H3ICRTiledPriorSchedule": H3ICRTiledPriorSchedule,
     "H3ICRTiled2KReport": H3ICRTiled2KReport,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3ICRTiled2KPatch": "Kirei H3 ICR Tiled 2K Patch [Experimental]",
+    "H3ICRTiledPriorSchedule": "Kirei H3 ICR Tiled Prior Schedule [Experimental]",
     "H3ICRTiled2KReport": "Kirei H3 ICR Tiled 2K Report",
 }

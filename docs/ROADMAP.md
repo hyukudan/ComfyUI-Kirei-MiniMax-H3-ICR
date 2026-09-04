@@ -1,149 +1,239 @@
 # Roadmap
 
 ## M0 — contracts and reproducible backend matrix — implemented in v0.1
-- backend-agnostic MODEL tag
-- strict H3 AV contracts
-- exact target geometry
-- learned provider API v1 / bicubic control
-- partial-sigma contract
-- exact audio lock on sampler 2
-- JSON metrics/report
+
+- backend-agnostic MODEL tag;
+- strict H3 AV contracts;
+- exact target geometry;
+- learned provider API v1 / bicubic control;
+- partial-sigma contract;
+- exact audio lock on sampler 2;
+- JSON metrics/report.
 
 ## M1 — initialization fidelity — implemented in v0.1
-- learned clean-video upscale
-- low-frequency Fourier initialization alignment
-- RMS correction guard
-- downsample error telemetry
+
+- learned clean-video upscale;
+- low-frequency Fourier initialization alignment;
+- RMS correction guard;
+- downsample-error telemetry.
 
 ## M2 — in-context regenerate harness — implemented in v0.1
-- native reference conditioning is an input to the integrated second pass
-- FL2VA / Hybrid 45–49 / Ref2VA can be run without changing this repository
-- identical-arm benchmark configuration documented
+
+- native reference conditioning is an input to the integrated second pass;
+- FL2VA / Hybrid 45–49 / Ref2VA can be run without changing this repository;
+- identical-arm benchmark configuration documented.
 
 ## M3a — per-step low-frequency fidelity — implemented experimentally
-- H3 NestedTensor/packed post-CFG projector
-- low-frequency Base-draft correction per H3 evaluation
-- structure-first sigma schedule
-- correction RMS telemetry
-- remaining: live ComfyUI validation with Spectrum / SA-Solver
 
-## M3b — latent measurement consistency — implemented experimentally
-- explicit `D(x0_HR) -> z_Base` measurement constraint
-- area-downsample measurement operator and normalized bicubic backprojection
-- measured `D(U(r))` gain normalization instead of assuming an exact adjoint
-- configurable low/full-band residual mix
-- robust residual weighting for large outliers
-- iterative re-measurement/backprojection option
-- independent RMS correction guard
-- structure-first sigma schedule
-- video-only NestedTensor/packed H3 post-CFG runtime; audio invariant preserved
-- integrated optional `H3_ICR_MEASUREMENT` input on `Kirei H3 ICR Regenerate`
-- before/after measurement-error telemetry in the main H3-ICR report
+- H3 NestedTensor/packed post-CFG projector;
+- low-frequency Base-draft correction per H3 evaluation;
+- structure-first sigma schedule;
+- correction RMS telemetry.
 
-Remaining before M3b is accepted:
-- decoded-media comparison against M3a-only and constraint-off controls
-- tune strength and high-band mix on dense ~1 MP and M4 2K
-- verify that lower latent measurement error does not suppress valid HR detail
-- compare one versus multiple internal projection iterations
-- evaluate whether a true VAE/pixel-space posterior step provides additional value after the latent projection baseline
+Remaining before acceptance:
+
+- live ComfyUI validation with the target samplers/backends;
+- verify interaction with M4 and the optional M3 measurement constraints;
+- confirm that late detail is not suppressed.
+
+## M3b — normalized latent measurement backprojection — implemented experimentally
+
+- explicit `D_latent(x0_HR) -> z_Base` constraint;
+- area-downsample measurement operator;
+- robust Base-grid residual weighting;
+- configurable low/full-band residual mix;
+- normalized bicubic residual lift using measured `D(U(r))` response;
+- backprojection-gain clamp;
+- optional internal re-measurement iterations;
+- independent HR RMS correction guard;
+- structure-first schedule;
+- video-only NestedTensor/packed H3 runtime;
+- audio invariant preserved;
+- integrated optional `H3_ICR_MEASUREMENT` input on `Kirei H3 ICR Regenerate`;
+- before/after measurement-error telemetry.
+
+Remaining before acceptance:
+
+- decoded-media comparison against M3a-only and constraint-off controls;
+- tune strength, band mix and internal iteration count on dense ~1 MP and M4 2K;
+- verify that lower Base-grid error does not suppress valid HR detail.
+
+## M3c — latent posterior gradient — implemented experimentally
+
+- explicit autograd gradient through `D_latent` only;
+- no H3-model or VAE gradient;
+- residual/gradient RMS normalization;
+- correction cap relative to HR/Base latent scale;
+- configurable cadence with `apply_every`;
+- AV-container and packed-H3 support;
+- exact audio pass-through;
+- measurement-error and gradient telemetry;
+- separate MODEL patch so it can be ablated against M3b.
+
+Remaining before acceptance:
+
+- determine whether the explicit latent gradient adds anything over M3b's cheaper normalized backprojection;
+- measure wall-time overhead versus M3b;
+- reject M3c if its decoded-media operating point is not better than M3b.
+
+## M3d — proxy-decoder pixel measurement — implemented experimentally
+
+- `x0_HR -> D_latent -> H3-compatible decoder` measurement path;
+- differentiable decoder branch runs at Base latent geometry, not 2K geometry;
+- 24-channel MiniMax H3 decoder validation;
+- lightweight H3 TAE/`taeh3` is the recommended first proxy;
+- full `MiniMaxH3VideoVAE` gradient is explicit opt-in;
+- cached reduced Base pixel reference;
+- RGB, spatial-edge and temporal-difference measurement losses;
+- configurable spatial measurement size and temporal stride;
+- pixel-RMSE-normalized gradient;
+- conservative latent RMS correction cap;
+- optional second decode for measured post-correction RMSE;
+- AV-container and packed-H3 support;
+- audio is never part of the decoder gradient and is copied unchanged;
+- dedicated nodes, telemetry, documentation and CPU contract tests.
+
+Initial laboratory values:
+
+```text
+strength:                  0.05
+apply_every:               4
+max_correction_rms_ratio:  0.02
+measurement_max_side:     384
+frame_stride:               2
+edge_weight:               0.25
+temporal_weight:           0.10
+verify_after:              false
+allow_full_vae:            false
+```
+
+Remaining before acceptance:
+
+- real `taeh3` CUDA backward validation inside ComfyUI;
+- compare M3d against M3a/M3b/M3c under identical seeds and media;
+- quantify proxy-decoder overhead and retained VRAM;
+- test 256/384 measurement size and frame stride 1/2/4;
+- determine whether edge or temporal terms materially improve decoded media;
+- test full VisualVAE backward only if operationally feasible;
+- reject M3d if proxy loss improves without a visible fidelity/detail benefit.
 
 ## M4 — 2K renderer — experimental implementation in PR #1
-Implemented on `feature/tiled-2k-fusion`:
-- spatial tile planner over target-video rows only
-- global dynamic LR H3 prior
-- overlap-weighted model-output fusion at every H3 evaluation
-- sigma-aware global-prior schedule with configurable floor/power
-- full global text/reference/audio context
-- exact full-canvas MM-RoPE coordinates for target-video tile rows
-- native HR keyframe crop/downscale handling and global MM-RoPE remapping
-- Spectrum retained only on the stable global prior branch; tile calls forced actual
-- live renderer and prior-schedule telemetry
-- 2048x1152 lab preset
-- fail-closed handling for unsupported topology/geometry
 
-Remaining before M4 is accepted:
-- decoded-media validation against dense ~1 MP H3-ICR
-- tune prior strength, prior floor/power and tile geometry from measured fidelity and VRAM
-- verify HR-keyframe propagation on faces, hands, products and text
-- decide whether a dense/wider-context final tail is still required after media tests
-- evaluate whether pass-1 trajectory replay improves the global prior over the current dynamic LR branch
-- investigate safe cache semantics instead of enabling EasyCache blindly
+Implemented on `feature/tiled-2k-fusion`:
+
+- spatial tile planner over target-video rows only;
+- global dynamic LR H3 prior;
+- overlap-weighted model-output fusion at every H3 evaluation;
+- sigma-aware global-prior schedule with configurable floor/power;
+- full global text/reference/audio context;
+- exact full-canvas MM-RoPE coordinates for target-video tile rows;
+- native HR keyframe crop/downscale handling and global MM-RoPE remapping;
+- Spectrum retained only on the stable global-prior branch; tile calls forced actual;
+- live renderer and prior-schedule telemetry;
+- 2048x1152 lab preset;
+- fail-closed handling for unsupported topology/geometry.
+
+Remaining before acceptance:
+
+- decoded-media validation against dense ~1 MP H3-ICR;
+- tune prior strength, prior floor/power and tile geometry from fidelity/VRAM measurements;
+- verify HR-keyframe propagation on faces, hands, products and text;
+- decide whether a dense/wider-context final tail is still required;
+- compare dynamic LR prior against optional pass-1 trajectory replay if trajectory capture is available;
+- investigate topology-safe cache semantics rather than enabling EasyCache blindly.
 
 ## M5a — passive calibrated attention v2 — implemented experimentally
-Implemented on the experimental branch:
-- passive function-style `optimized_attention_override` profiler
-- output-neutral/no-op test contract
-- bounded sampled Q/K analysis without materializing SxS attention
-- importance-corrected modality mass for text / visual condition / audio condition / target audio / target video
-- exact sampled target-video QK pairs: diagonal, spatial neighbor, temporal neighbor and far-video
-- exact `spatial_minus_far` / `temporal_minus_far` margins per head
-- layer/head/sigma/M4-branch buckets
-- one canonical packed topology per branch per calibration run
-- topology descriptor includes native target signature plus ordered segment kinds/row counts
-- architecture, topology and complete-profile SHA-256 fingerprints
-- proposal-only head classification using both modal mass and exact-pair evidence
 
-Remaining before M5a is accepted:
-- collect real profiles across FL2VA / Hybrid / Ref2VA
-- separate calibration by target geometry, duration and packed reference/keyframe topology
-- full `layer_stride=1` runs after light-profile stability is confirmed
-- quantify run-to-run / seed stability of head classification
-- verify profiler overhead and output neutrality on the real CUDA H3 runtime
+- output-neutral function-style `optimized_attention_override` profiler;
+- bounded sampled Q/K analysis without materializing SxS attention;
+- importance-corrected modality mass for text / visual condition / audio condition / target audio / target video;
+- exact sampled target-video QK pairs: diagonal, spatial neighbor, temporal neighbor and far-video;
+- exact `spatial_minus_far` / `temporal_minus_far` margins per head;
+- layer/head/sigma/M4-branch buckets;
+- one canonical packed topology per branch per calibration run;
+- topology descriptor includes native target signature and ordered segment kinds/row counts;
+- architecture, topology and complete-profile SHA-256 fingerprints;
+- proposal-only head classification using both modal mass and exact-pair evidence.
+
+Remaining before acceptance:
+
+- collect real profiles across FL2VA / Hybrid / Ref2VA;
+- separate calibration by target geometry, duration and packed reference/keyframe topology;
+- full `layer_stride=1` runs after light-profile stability is confirmed;
+- quantify run-to-run / seed stability of head classification;
+- verify profiler overhead and output neutrality on real CUDA H3.
 
 ## M5b — real FlexAttention sparse executor v2 — implemented experimentally
-Implemented on the experimental branch:
-- real PyTorch FlexAttention + `BlockMask` execution path
-- current and legacy proposal-label compatibility
-- proposal/architecture/profile fingerprint validation
-- runtime branch-specific packed-topology validation
-- dense topology fallback outside the calibrated domain
-- per-head local-3D / spatial / temporal target-video patterns
-- all text/reference/keyframe/audio and non-target-video links remain global/dense
-- mandatory dense sigma tail
-- dense fallback on non-CUDA, external masks, incomplete/dense policies or low measured block sparsity
-- topology/layer/policy/device BlockMask cache
-- modern PyTorch `BACKEND="TRITON"` selection with legacy `FORCE_USE_FLEX_ATTENTION` compatibility
-- runtime telemetry for sparse calls, all fallback classes, mask builds/cache hits and measured BlockMask sparsity
 
-Remaining before M5b is accepted:
-- real CUDA equivalence controls on the target H3 checkpoints
-- benchmark first-use compilation/mask-build overhead separately from steady-state execution
-- peak VRAM and wall-time measurements on dense ~1 MP and M4 2K
-- actual BlockMask sparsity per layer/head topology
-- topology-fallback and policy-fallback rates
-- tune dense-tail sigma and local radii from decoded media rather than statistics alone
-- complete decoded-video parity before any speedup/default claim
-- consider alternative sparse kernels only if FlexAttention cannot deliver a useful measured gain on the target GPUs
+- real PyTorch FlexAttention + `BlockMask` execution;
+- current and legacy proposal-label compatibility;
+- proposal/architecture/profile fingerprint validation;
+- runtime branch-specific packed-topology validation;
+- dense topology fallback outside the calibrated domain;
+- per-head local-3D / spatial / temporal target-video patterns;
+- all text/reference/keyframe/audio and non-target-video links remain global/dense;
+- mandatory dense sigma tail;
+- dense fallback on non-CUDA, external masks, incomplete/dense policies or low measured block sparsity;
+- topology/layer/policy/device BlockMask cache;
+- modern PyTorch `BACKEND="TRITON"` selection with legacy compatibility;
+- telemetry for sparse calls, fallbacks, mask builds/cache hits and block sparsity.
+
+Remaining before acceptance:
+
+- real CUDA equivalence controls on target H3 checkpoints;
+- benchmark first-use compilation/mask-build overhead separately from steady state;
+- peak VRAM and wall-time measurements on dense ~1 MP and M4 2K;
+- actual BlockMask sparsity by layer/head/topology;
+- topology/policy fallback rates;
+- tune dense-tail sigma and local radii from decoded media;
+- complete decoded-video parity before any speedup/default claim.
 
 ## M5c — topology + sigma-domain policy v3 — implemented experimentally
-Implemented as an optional policy layer over M5a/M5b:
-- retains the v2 aggregate layer policy for analysis
-- emits explicit `branch + topology digest + sigma + layer` domains from existing profiler buckets
-- preserves exact QK pair evidence independently inside every sigma domain
-- Flex runtime selects the nearest calibrated sigma independently per layer
-- configurable `max_policy_sigma_distance`, default 0.03
-- sigma-domain miss -> empty sparse layer map -> native dense fallback
-- no categorical interpolation between unobserved sigma coordinates
-- aggregate v2 layer map restored after every model call
-- BlockMask reuse remains possible across sigmas only when the effective per-head policy codes are identical
-- sigma-domain match/fallback and distance telemetry
 
-Remaining before M5c is accepted:
-- compare v2 static topology-bound policy against v3 sigma-domain policy on the same decoded-media benchmark
-- determine useful sigma sampling density from real H3 schedules
-- measure how frequently v3 falls back to dense at the default 0.03 tolerance
-- tune tolerance only from parity/speed measurements, not to maximize sparse-call rate
-- verify that sigma-specific policies improve parity or the speed/quality operating point before preferring v3 over v2
+- retains v2 aggregate layer policy for analysis;
+- emits explicit `branch + topology digest + sigma + layer` domains;
+- preserves exact QK-pair evidence per sigma domain;
+- Flex runtime selects nearest calibrated sigma independently per layer;
+- configurable `max_policy_sigma_distance`, default 0.03;
+- sigma-domain miss -> native dense fallback;
+- no categorical interpolation between unobserved sigma coordinates;
+- BlockMask reuse remains possible when effective head codes are identical;
+- sigma-domain match/fallback/distance telemetry.
 
-## M6 — BaseVideo Adapter + detail LoRA
-- frozen H3 backbone
-- static base-video stream + dynamic current-x0 stream
-- timestep-dependent cross attention
-- zero-init residual injection
-- sparse HR keyframe anchors
-- AIGC-oriented degradations
+Remaining before acceptance:
+
+- compare v2 static topology-bound versus v3 sigma-domain policy on the same decoded-media benchmark;
+- determine useful sigma sampling density from real H3 schedules;
+- measure fallback frequency at tolerance 0.03;
+- prefer v3 only if it improves parity or the speed/quality operating point.
+
+## M6 — state-aware BaseVideo Adapter + detail LoRA — next engineering stage
+
+Planned contract:
+
+- H3 backbone frozen initially;
+- **static stream:** clean Base/draft video features;
+- **dynamic stream:** current predicted-clean / denoising state;
+- optional sparse HR-keyframe stream;
+- sigma-conditioned structure-to-detail gating;
+- zero-initialized residual injection so an untrained adapter is exact backbone parity;
+- selected H3 blocks first, wider injection only after evidence;
+- explicit adapter checkpoint/provider ABI;
+- incompatible or missing adapter weights fail closed;
+- training data includes real H3 Base rollouts and AIGC-oriented degradations, not only bicubic camera video;
+- training losses may include flow/teacher objective, latent measurement consistency, temporal consistency and high-frequency wavelet/HOG terms.
+
+M6 acceptance requires:
+
+- zero-init/no-weight parity contract;
+- reproducible checkpoint metadata and architecture binding;
+- improved decoded-media detail/fidelity over the best training-free teacher;
+- no identity/object/action regressions;
+- measured additional VRAM and wall-time cost.
 
 ## M7 — distillation
-- establish multi-step teacher first
-- 2–4 step student
-- one-step only after trajectory/fidelity parity is demonstrated
+
+- establish a validated multi-step teacher first;
+- progressive trajectory-preserving distillation;
+- 2–4 step student before one-step experiments;
+- optional one-step adversarial/preference refinement only after trajectory/fidelity parity is demonstrated.

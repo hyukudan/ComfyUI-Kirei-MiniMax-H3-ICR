@@ -62,9 +62,10 @@ def patch_measurement_consistency(
 ) -> tuple[Any, MeasurementConsistencyStats]:
     """Attach the latent measurement-consistency projector after CFG.
 
-    The hook supports H3 NestedTensor x0 and packed AV representations and only edits
-    the target-video stream. It is intended to be installed after the low-frequency
-    fidelity projector so D(x0_HR) -> z_Base is the last structural correction.
+    The hook supports tuple/list AV test containers, H3 NestedTensor x0 and packed AV
+    representations and only edits the target-video stream. It is intended to be
+    installed after the low-frequency fidelity projector so D(x0_HR) -> z_Base is
+    the last structural correction.
     """
     clone = getattr(model, "clone", None)
     setter = getattr(model, "set_model_sampler_post_cfg_function", None)
@@ -98,7 +99,11 @@ def patch_measurement_consistency(
         denoised = args["denoised"]
         sigma = _scalar_sigma(args["sigma"])
 
-        if getattr(denoised, "is_nested", False) or getattr(denoised, "tensors", None) is not None:
+        if (
+            isinstance(denoised, (tuple, list))
+            or getattr(denoised, "is_nested", False)
+            or getattr(denoised, "tensors", None) is not None
+        ):
             video, audio = unwrap_av(denoised)
             corrected, schedule, summary = apply_video(video, sigma)
             stats.record(schedule, summary)

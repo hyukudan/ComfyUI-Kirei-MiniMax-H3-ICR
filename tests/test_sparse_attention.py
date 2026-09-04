@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import torch
 
 from h3_icr.sparse_attention import (

@@ -66,6 +66,29 @@ def _tensor_descriptor(tensor: torch.Tensor) -> dict[str, Any]:
     }
 
 
+def _tensor_container_descriptor(value: Any, *, path: str) -> dict[str, Any] | None:
+    """Describe ComfyUI containers such as comfy.nested_tensor.NestedTensor.
+
+    H3 AV latents use a lightweight object with a ``tensors`` attribute rather
+    than PyTorch's native nested-tensor type.  Keep the descriptor independent
+    of the concrete ComfyUI class so fingerprints remain stable across runtime
+    refactors that preserve the ordered tensor payload.
+    """
+    members = getattr(value, "tensors", None)
+    if members is None:
+        return None
+    if not isinstance(members, (list, tuple)) or not members:
+        raise TypeError(f"validation tensor container at {path} must contain an ordered tensor sequence")
+    if not all(torch.is_tensor(member) for member in members):
+        raise TypeError(f"validation tensor container at {path} contains a non-tensor member")
+    children = [_tensor_descriptor(member) for member in members]
+    return {
+        "type": "tensor_container",
+        "children": children,
+        "sha256": _digest(children),
+    }
+
+
 def canonical_descriptor(value: Any, *, strict: bool = True, path: str = "$") -> Any:
     if value is None or isinstance(value, (bool, str)):
         return value
@@ -77,6 +100,9 @@ def canonical_descriptor(value: Any, *, strict: bool = True, path: str = "$") ->
         return value
     if torch.is_tensor(value):
         return _tensor_descriptor(value)
+    tensor_container = _tensor_container_descriptor(value, path=path)
+    if tensor_container is not None:
+        return tensor_container
     if isinstance(value, (bytes, bytearray, memoryview)):
         raw = bytes(value)
         return {"type": "bytes", "length": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}

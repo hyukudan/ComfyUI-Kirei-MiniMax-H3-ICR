@@ -33,6 +33,11 @@ class FakeModel:
         self.model_options = {"transformer_options": transformer}
 
 
+class FakeComfyNestedTensor:
+    def __init__(self, tensors):
+        self.tensors = tuple(tensors)
+
+
 def _backend(kind="fl2va_reference", checkpoint="a", overlay=""):
     return {
         "api": 1,
@@ -105,6 +110,28 @@ def test_manifest_is_deterministic_for_identical_content():
     assert first == second
     assert len(first["run_id"]) == 64
     validate_manifest_integrity(first)
+
+
+def test_comfy_nested_tensor_container_has_stable_strict_fingerprint():
+    video = torch.arange(24, dtype=torch.float32).reshape(1, 2, 3, 2, 2)
+    audio = torch.arange(12, dtype=torch.float32).reshape(1, 2, 2, 3)
+    first = canonical_descriptor(FakeComfyNestedTensor((video, audio)), strict=True)
+    second = canonical_descriptor(FakeComfyNestedTensor((video.clone(), audio.clone())), strict=True)
+    assert first == second
+    assert first["type"] == "tensor_container"
+    assert [child["shape"] for child in first["children"]] == [
+        [1, 2, 3, 2, 2],
+        [1, 2, 2, 3],
+    ]
+
+
+def test_comfy_nested_tensor_container_rejects_non_tensor_members():
+    try:
+        canonical_descriptor(FakeComfyNestedTensor((torch.zeros(1), "audio")), strict=True)
+    except TypeError as exc:
+        assert "non-tensor member" in str(exc)
+    else:
+        raise AssertionError("strict validation must reject malformed tensor containers")
 
 
 def test_tensor_hash_changes_when_base_content_changes():

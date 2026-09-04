@@ -43,9 +43,12 @@ Clone the repository into ComfyUI custom nodes:
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/hyukudan/ComfyUI-Kirei-MiniMax-H3-ICR.git
+cd ComfyUI-Kirei-MiniMax-H3-ICR
+git checkout feature/tiled-2k-fusion
 ```
 
-The repository does not vendor MiniMax H3, Hybrid, Spectrum or the companion latent upscaler. Those remain external ComfyUI components/checkpoints.
+The repository includes the native Kirei latent-upscaler runtime and ComfyUI provider node. It does
+not vendor the 691 MB checkpoint, MiniMax H3, Hybrid or Spectrum weights.
 
 For development tests outside ComfyUI:
 
@@ -57,12 +60,51 @@ ruff check h3_icr tests
 
 The CPU test suite covers model-independent contracts. Actual H3 generation, M3d decoder gradients, M4 performance, M5 FlexAttention and M6 trained adapters require a current ComfyUI MiniMax H3 runtime.
 
-## Companion components
+## Native learned clean initializer
 
-Preferred learned clean initializer:
+The experimental branch includes its own strict `H3_LATENT_UPSCALER` API-v1 runtime and provider:
 
-- `xmarre/Comfyui_Minimax_h3_latent_Upscaler`
-- use its `H3_LATENT_UPSCALER` API-v1 provider.
+- use **Kirei H3 ICR Learned Latent Upscaler [Native]**;
+- select `minimax_h3_latent_upscaler_3d_bf16.safetensors` and either place it in
+  `ComfyUI/models/kirei_h3_upscalers/` or explicitly enable `download_if_missing`;
+- downloads are written atomically and accepted only after the registered byte-size and SHA-256 match;
+- the model is loaded lazily, spatial output is exact-target, temporal length is preserved and optional
+  chunking/offload keep the H3 pass within the normal ComfyUI lifecycle.
+
+No external upscaler node implementation is required by the Kirei graph.
+
+The currently registered bootstrap checkpoint is the public
+[LBH-123-AI MiniMax H3 Latent Upscaler BF16](https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler),
+listed by its model card as Apache-2.0. Its expected SHA-256 is
+`4f57821f5837f32f7142b67d815606dbd7550f194e5c769f7d6c3f83b146a5e6`. The runtime/provider is
+part of this repository; the checkpoint remains a separately attributed third-party model. See
+[`THIRD_PARTY_NOTICE.md`](THIRD_PARTY_NOTICE.md).
+
+The author model card reports training on roughly 80,000 paired samples, including video and 2K
+image pairs, with explicit 1.5x examples and additional continuous scales between 1x and 4x. Kirei
+has not independently audited that training corpus or provenance; this is recorded as an author
+claim rather than a verified property of the weights.
+
+Temporal controls:
+
+- `temporal_chunk_size=0` runs the complete clip in one pass and is recommended when VRAM allows;
+- `temporal_chunk_size=32` is the memory-oriented default for longer clips;
+- `temporal_stability=0.30` is the experimental-branch provisional default. It smooths only the
+  learned high-resolution residual, retaining the Base motion path instead of blurring the whole
+  latent. Promotion outside this branch requires decoded-video human A/B plus an unstabilized arm;
+- use `0.0` for exact checkpoint output or when measuring an untouched control arm.
+
+Optional reference-parity test (requires CUDA, the checkpoint and a local checkout of the public
+reference runtime):
+
+```bash
+KIREI_H3_UPSCALER_CHECKPOINT=/path/to/minimax_h3_latent_upscaler_3d_bf16.safetensors \
+KIREI_H3_UPSCALER_REFERENCE=/path/to/minimax_h3_latent_upscaler_3d.py \
+pytest tests/test_latent_upscaler_reference_parity.py -q
+```
+
+The test covers full-context, chunked and the real anisotropic 54x48 to 80x72 geometry. It is
+skipped in ordinary CPU CI because the third-party 691 MB checkpoint is deliberately not vendored.
 
 Hybrid is intentionally external. Kirei H3-ICR consumes the resulting ComfyUI `MODEL`; it does not copy or vendor the Hybrid loader.
 
@@ -92,7 +134,7 @@ Implemented on `main`:
 3. Optionally use **Kirei H3 ICR Append Base Latent Reference** for exact DiT-side Base reference conditioning.
 4. Load one controlled backend arm: FL2VA, Hybrid 45-49, Ref2VA, or all-AdaLN as a high-risk control.
 5. Optionally attach **Kirei H3 ICR Backend Tag**.
-6. Connect the companion learned 3D latent-upscaler provider.
+6. Connect **Kirei H3 ICR Learned Latent Upscaler [Native]** from this repository.
 7. Use a partial schedule: `0 <= sigmas[0] < 1`.
 8. Run **Kirei H3 ICR Regenerate**.
 
@@ -548,6 +590,7 @@ Zero-init scaffold providers own no additional checkpoint. Trained M6 providers 
 - **Kirei H3 ICR Backend Tag**
 - **Kirei H3 ICR Append Base Latent Reference**
 - **Kirei H3 ICR Prepare Clean HR**
+- **Kirei H3 ICR Learned Latent Upscaler [Native]**
 - **Kirei H3 ICR Measurement Consistency [Experimental]** — M3b
 - **Kirei H3 ICR Posterior Consistency [Experimental]** — M3c
 - **Kirei H3 ICR Posterior Consistency Report**

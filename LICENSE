@@ -3,6 +3,6 @@ Copyright (c) 2026. All rights reserved.
 Source-available research repository. No license is granted for redistribution, sublicensing,
 or commercial use unless separately agreed by the copyright holder.
 
-Third-party projects referenced by this repository retain their own licenses. This
-repository intentionally interoperates with, rather than copies, external ComfyUI
-custom nodes such as Hybrid loaders and learned latent upscalers.
+Third-party projects and model checkpoints referenced by this repository retain
+their own licenses. See THIRD_PARTY_NOTICE.md for the separately distributed
+latent-upscaler checkpoint used by the optional native Kirei provider.

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Bundle the native Kirei H3 learned latent-upscaler provider in this repository.
+- Add explicit, atomic and SHA-256-verified download of the registered BF16 checkpoint.
+- Reuse checkpoints already present in either `kirei_h3_upscalers` or `latent_upscale_models`.
+- Add full-sequence inference (`temporal_chunk_size=0`) and learned-residual temporal stabilization.
+- Support real ComfyUI `NestedTensor` containers in strict validation fingerprints.
+
 ## 0.1.0 — 2026-09-04
 
 - Initial Kirei research implementation.

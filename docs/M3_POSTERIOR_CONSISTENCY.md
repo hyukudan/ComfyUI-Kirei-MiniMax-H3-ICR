@@ -1,16 +1,14 @@
-# M3B — Latent Posterior / Measurement Consistency
+# M3c — Latent Posterior Gradient Consistency
 
 Status: experimental, off by default, awaiting real H3 media validation.
 
 ## Motivation
 
-The existing per-step fidelity projector intentionally corrects only **low spatial frequencies** of the H3 predicted-clean HR video toward the Base draft. That protects structure while leaving higher-frequency degrees of freedom available to H3.
+The low-frequency fidelity projector and M3b normalized measurement backprojection already protect the Base draft in latent space. M3c asks a narrower inverse-problem question:
 
-Posterior consistency answers a different question:
+> Does the complete HR clean estimate still reproduce the observed H3 Base latent through the known LR measurement operator, and does an explicit measurement gradient help beyond direct backprojection?
 
-> Does the complete HR clean estimate still reproduce the observed H3 Base latent when passed through the known LR measurement operator?
-
-The initial measurement is therefore:
+The measurement is:
 
 ```text
 D(x0_HR) ~= z_Base
@@ -20,7 +18,7 @@ where `D` is spatial H3-latent area downsampling and `z_Base` is the clean pass-
 
 ## Current implementation
 
-The experimental patch computes one DPS-style correction without differentiating through H3 or the VAE:
+M3c computes a DPS-style latent measurement correction without differentiating through H3 or the VAE:
 
 ```text
 probe = detach(x0_HR)
@@ -32,37 +30,30 @@ g = d(loss) / d(probe)
 
 Autograd exists only through the spatial measurement operator.
 
-The raw gradient magnitude depends on the resize geometry, so the update is normalized by residual and gradient RMS:
+The update is normalized by residual and gradient RMS:
 
 ```text
 g_norm = g * RMS(residual) / RMS(g)
 correction = -strength * g_norm
 ```
 
-The correction is then capped relative to the larger RMS scale of the HR estimate and Base observation.
+The correction is capped relative to the larger RMS scale of the HR estimate and Base observation. No H3 parameters, H3 activations or VAE decoder are part of this gradient.
 
-No H3 model parameters, H3 activations or VAE decoder are part of this gradient.
+## Relationship to M3a/M3b/M3d
 
-## Why it is separate from low-frequency fidelity
+### M3a — low-frequency latent fidelity
+Protects global layout, motion and identity structure while deliberately leaving high frequencies free.
 
-The two mechanisms have intentionally different roles:
+### M3b — normalized latent measurement backprojection
+Uses the Base-grid residual directly, with measured backprojection normalization, robust weighting and optional internal iterations.
 
-### Low-frequency per-step fidelity
+### M3c — latent posterior gradient
+Uses autograd only through `D_latent`; it is a separate control for whether an explicit inverse-problem gradient helps beyond M3b's direct residual lift.
 
-- filters the Base residual spatially;
-- preserves global layout / motion / identity structure;
-- is strongest early and can relax toward sigma 0;
-- deliberately does **not** force the entire LR measurement residual to zero.
+### M3d — proxy-decoder pixel measurement
+Adds decoder semantics by differentiating pixel/edge/temporal loss through an H3-compatible decoder at Base latent geometry. See `M3_PIXEL_MEASUREMENT.md`.
 
-### Posterior consistency
-
-- uses the full latent measurement residual;
-- tests the explicit inverse-problem constraint `D(x0_HR) -> z_Base`;
-- can catch drift that survives the low-frequency projector;
-- costs an additional autograd pass through spatial downsampling;
-- is therefore applied only every N post-CFG calls by default.
-
-The two can be tested independently or chained. Posterior consistency is not enabled automatically by `H3 ICR Regenerate`.
+These mechanisms must be ablated independently before combining them.
 
 ## Initial laboratory settings
 
@@ -76,11 +67,11 @@ These are conservative hypotheses, not tuned defaults.
 
 ## Audio invariant
 
-The patch only changes the video member of the H3 AV clean state. Audio is copied through exactly and is never included in the spatial measurement gradient.
+The patch only changes the video member of the H3 AV clean state. Audio is copied through exactly and is never included in the measurement gradient.
 
 ## Representation support
 
-The hook supports both H3 clean-state forms used around ComfyUI sampler callbacks:
+The hook supports:
 
 - NestedTensor / `(video, audio)` AV containers;
 - packed AV tensors when `latent_shapes` are available from the active H3 model.
@@ -97,27 +88,28 @@ The report records:
 - mean/max correction RMS ratio;
 - mean measurement-gradient RMS.
 
-A valid configuration should reduce measurement error on applied calls. That alone is not sufficient for acceptance: decoded-video detail and temporal behavior remain the quality gate.
+A lower latent measurement error is not sufficient for acceptance. Decoded-video detail, temporal behavior and Base fidelity remain the gate.
 
 ## Recommended A/B gate
 
-Use the same Base latent, conditioning, backend, noise, sampler and sigmas and compare:
+Keep Base latent, conditioning, backend, noise, sampler and sigmas identical and compare:
 
-1. low-frequency fidelity only;
-2. posterior consistency only;
-3. both;
-4. neither.
+1. M3a only;
+2. M3a + M3b;
+3. M3a + M3c;
+4. M3c only;
+5. all measurement constraints off.
 
-For each arm inspect:
+Inspect:
 
 - `D(x0_HR)` latent error;
-- draft identity/object/motion fidelity;
-- detail retained at faces, hands, products and text;
+- identity/object/motion fidelity;
+- faces, hands, products and text;
 - temporal flicker;
 - wall-time overhead.
 
-If measurement error improves but the decoded video becomes flatter, less detailed or less temporally stable, the posterior treatment loses.
+If measurement error improves but decoded video becomes flatter, less detailed or less stable, M3c loses.
 
-## Future pixel-space DPS experiment
+## Pixel-space follow-up
 
-A later, more expensive experiment may decode selected clean states, apply a known pixel-space degradation operator and differentiate the measurement residual back into the H3 latent through the VAE decoder. That path is **not implemented** in the current MVP and should only be considered if latent-space consistency gives a clear benefit.
+The separate M3d experiment is now implemented. It avoids differentiable 2K decoding by applying `D_latent` first and then differentiating a reduced pixel measurement through an H3-compatible decoder at Base latent geometry. The lightweight `taeh3` decoder is the recommended first proxy; full VisualVAE gradients remain explicit opt-in.

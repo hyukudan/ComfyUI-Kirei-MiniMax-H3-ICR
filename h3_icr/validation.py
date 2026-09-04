@@ -38,8 +38,6 @@ def _tensor_bytes_digest(tensor: torch.Tensor, *, chunk_bytes: int = 1024 * 1024
         raise ValueError("validation tensor contains NaN/Inf")
     raw = cpu.view(torch.uint8).flatten()
     digest = hashlib.sha256()
-    # NumPy is available in normal ComfyUI installs and is much faster. The
-    # list fallback keeps the unit suite independent of NumPy.
     try:
         array = raw.numpy()
         digest.update(memoryview(array).cast("B"))
@@ -101,6 +99,14 @@ def canonical_descriptor(value: Any, *, strict: bool = True, path: str = "$") ->
     to_dict = getattr(value, "to_dict", None)
     if callable(to_dict):
         return canonical_descriptor(to_dict(), strict=strict, path=path)
+    if callable(value):
+        descriptor = _callable_descriptor(value)
+        closure = getattr(value, "__closure__", None)
+        if strict and closure:
+            raise TypeError(
+                f"unsupported callable closure at {path}: {descriptor['module']}.{descriptor['qualname']}"
+            )
+        return {"type": "callable", **descriptor}
     if strict:
         raise TypeError(
             f"unsupported validation object at {path}: {type(value).__module__}.{type(value).__qualname__}"
@@ -196,8 +202,9 @@ def handle_descriptor(handle: Any) -> dict[str, Any] | None:
     for key in ("api", "decoder_kind"):
         if key in handle:
             payload[key] = canonical_descriptor(handle[key], strict=True, path=f"$.handle.{key}")
-    if "config" in handle:
-        payload["config"] = canonical_descriptor(handle["config"], strict=True, path="$.handle.config")
+    for key in ("config", "prior_schedule"):
+        if key in handle:
+            payload[key] = canonical_descriptor(handle[key], strict=True, path=f"$.handle.{key}")
     if "runtime" in handle:
         payload["runtime"] = _runtime_descriptor(handle["runtime"])
     return payload
@@ -241,7 +248,12 @@ def _backend_descriptor(model: Any, backend: Any) -> dict[str, Any]:
     raw = research.get("backend")
     if raw is not None:
         return raw
-    return {"kind": "unknown", "checkpoint_format": "unknown", "checkpoint_sha256": "", "overlay_sha256": ""}
+    return {
+        "kind": "unknown",
+        "checkpoint_format": "unknown",
+        "checkpoint_sha256": "",
+        "overlay_sha256": "",
+    }
 
 
 def build_validation_manifest(
@@ -285,6 +297,8 @@ def build_validation_manifest(
         "adapter_m6": handle_descriptor(adapter),
     }
     features = {key: value for key, value in features.items() if value is not None}
+    research = model_research_descriptor(model)
+    research.pop("backend", None)
 
     manifest: dict[str, Any] = {
         "api": VALIDATION_API,
@@ -309,7 +323,7 @@ def build_validation_manifest(
         "arm": {
             "backend": _backend_descriptor(model, backend),
             "features": features,
-            "model_research": model_research_descriptor(model),
+            "model_research": research,
             "settings": canonical_descriptor(arm_settings, strict=True, path="$.arm_settings"),
         },
     }
@@ -402,6 +416,8 @@ def compare_validation_manifests(
     right = dict(manifest_b)
     left.pop("run_id", None)
     right.pop("run_id", None)
+    left.pop("warnings", None)
+    right.pop("warnings", None)
     allowed = ("$.experiment.arm",) + parse_allowed_differences(allowed_differences)
     diffs = _diff_values(left, right)
     accepted = [diff for diff in diffs if _path_allowed(diff["path"], allowed)]

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add an experimental native Kirei VAE round-trip upscale-prior node.
+- Add optional one-shot full-latent VAE-prior fusion to Regenerate with exact audio bypass.
+- Keep the existing learned-only path unchanged when no VAE prior is connected.
 - Bundle the native Kirei H3 learned latent-upscaler provider in this repository.
 - Add explicit, atomic and SHA-256-verified download of the registered BF16 checkpoint.
 - Reuse checkpoints already present in either `kirei_h3_upscalers` or `latent_upscale_models`.

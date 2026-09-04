@@ -10,6 +10,7 @@ from .reference import append_base_latent_reference
 from .runtime_fidelity import patch_per_step_fidelity
 from .runtime_measurement import patch_measurement_consistency
 from .sampling import mark_second_pass, run_second_pass, validate_partial_sigmas
+from .vae_prior import fuse_vae_prior
 
 
 class H3ICRBackendTag:
@@ -209,6 +210,11 @@ class H3ICRRegenerate:
                 "learned_upscaler": ("H3_LATENT_UPSCALER",),
                 "backend": ("H3_ICR_BACKEND",),
                 "measurement_consistency": ("H3_ICR_MEASUREMENT",),
+                "vae_prior_latent": ("LATENT",),
+                "vae_prior_strength": (
+                    "FLOAT",
+                    {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.05},
+                ),
             },
         }
 
@@ -244,6 +250,8 @@ class H3ICRRegenerate:
         learned_upscaler=None,
         backend=None,
         measurement_consistency=None,
+        vae_prior_latent=None,
+        vae_prior_strength=0.25,
     ):
         metrics = ICRMetrics()
         sigma_start = validate_partial_sigmas(sigmas)
@@ -263,6 +271,18 @@ class H3ICRRegenerate:
             learned_upscaler,
         )
         metrics.event("initialization", **init_report)
+        if vae_prior_latent is not None:
+            if not isinstance(vae_prior_latent, dict) or "samples" not in vae_prior_latent:
+                raise TypeError("vae_prior_latent must be a Kirei H3 VAE Upscale Prior LATENT")
+            clean_samples, vae_prior_report = fuse_vae_prior(
+                clean["samples"],
+                vae_prior_latent["samples"],
+                vae_prior_strength,
+            )
+            clean = dict(clean)
+            clean["samples"] = clean_samples
+            clean.pop("noise_mask", None)
+            metrics.event("vae_prior_fusion", **vae_prior_report)
         prepared_model = mark_second_pass(model)
         source_video, _ = unwrap_av(base_latent["samples"])
 

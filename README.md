@@ -94,6 +94,42 @@ Temporal controls:
   latent. Promotion outside this branch requires decoded-video human A/B plus an unstabilized arm;
 - use `0.0` for exact checkpoint output or when measuring an untouched control arm.
 
+### Experimental VAE round-trip prior
+
+The branch also contains **Kirei H3 ICR VAE Upscale Prior [Experimental]**. It provides a premium,
+slower initialization arm without depending on another custom-node repository:
+
+```text
+clean H3 Base AV latent
+  -> decode video with the H3 VAE
+  -> deterministic Lanczos resize in RGB
+  -> encode at target resolution
+  -> one-shot full-latent blend with the learned 3D initialization
+  -> normal Kirei H3 ICR second pass
+```
+
+Connect its `vae_prior_latent` output to the optional input of **Kirei H3 ICR Regenerate** and start
+with `vae_prior_strength=0.25`. Audio bypasses decode, resize, encode and fusion exactly. Leaving the
+prior disconnected preserves the learned-only path. The blend is deliberately full-latent: Kirei
+does not assume that the 24 H3 channels have separable spatial-frequency meanings.
+
+This is an experimental quality mode rather than a replacement for the learned upscaler. It adds one
+full H3 video decode and encode, can be expensive on long or high-resolution clips, and must be judged
+with decoded-video temporal metrics as well as still-frame sharpness. The first real 1152x1280 gate
+showed that the VAE/Lanczos round-trip retained more decoded sharpness and Base fidelity than the raw
+learned initialization while remaining close to Base temporal motion.
+
+On the first controlled 8-step portrait clip, with learned temporal stability fixed at `0.30`:
+
+| VAE-prior strength | PSNR to resized Base vs learned-only | Laplacian sharpness vs learned-only | decoded warp error vs learned-only | interpretation |
+|---:|---:|---:|---:|---|
+| `0.25` | +1.24 dB | +1.96% | +2.08% | balanced research preset |
+| `0.50` | +2.09 dB | +10.49% | +5.55% | high-detail arm; temporal cost is already borderline |
+
+No obvious halo or duplicate-face artifact appeared in the sampled frames. Keep `0.25` as the suggested
+starting point and `0.50` as a comparison arm, not a production default. These are single-clip results;
+promotion still requires varied motion, camera movement, texture and scene-cut validation.
+
 Optional reference-parity test (requires CUDA, the checkpoint and a local checkout of the public
 reference runtime):
 
@@ -135,8 +171,9 @@ Implemented on `main`:
 4. Load one controlled backend arm: FL2VA, Hybrid 45-49, Ref2VA, or all-AdaLN as a high-risk control.
 5. Optionally attach **Kirei H3 ICR Backend Tag**.
 6. Connect **Kirei H3 ICR Learned Latent Upscaler [Native]** from this repository.
-7. Use a partial schedule: `0 <= sigmas[0] < 1`.
-8. Run **Kirei H3 ICR Regenerate**.
+7. Optionally connect **Kirei H3 ICR VAE Upscale Prior [Experimental]** for a controlled premium arm.
+8. Use a partial schedule: `0 <= sigmas[0] < 1`.
+9. Run **Kirei H3 ICR Regenerate**.
 
 ### Backend comparison matrix
 

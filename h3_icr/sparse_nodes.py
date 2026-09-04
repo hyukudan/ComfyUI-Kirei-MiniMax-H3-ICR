@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from .sparse_attention_v2 import patch_flex_sparse_attention_v2
+from .sparse_attention_v3 import patch_flex_sparse_attention_v3
 
 
 class H3ICRFlexSparseAttention:
@@ -14,6 +14,10 @@ class H3ICRFlexSparseAttention:
                 "policy_json": ("STRING", {"multiline": True, "default": ""}),
                 "model_id": ("STRING", {"default": ""}),
                 "dense_tail_sigma": ("FLOAT", {"default": 0.12, "min": 0.0, "max": 0.99, "step": 0.01}),
+                "max_policy_sigma_distance": (
+                    "FLOAT",
+                    {"default": 0.03, "min": 0.0, "max": 1.0, "step": 0.005},
+                ),
                 "block_size": ([16, 32, 64, 128, 256], {"default": 128}),
                 "min_block_sparsity": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 100.0, "step": 1.0}),
                 "local_t_radius": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
@@ -32,10 +36,9 @@ class H3ICRFlexSparseAttention:
     FUNCTION = "patch"
     CATEGORY = "Kirei/MiniMax H3/ICR/Research"
     DESCRIPTION = (
-        "Experimental M5 v2 real block-sparse backend using PyTorch FlexAttention BlockMask. "
-        "It requires a current M5 v2 policy with matching H3 architecture and calibrated packed-layout "
-        "topology, keeps all cross-modal links global, reuses BlockMasks across sigmas, and returns to "
-        "dense attention in the configured sigma tail or whenever the runtime topology is outside calibration."
+        "Experimental M5 v3 FlexAttention BlockMask backend. It requires the current topology- and "
+        "sigma-domain-bound M5 policy. Every call selects the closest calibrated branch/topology/sigma "
+        "domain inside max_policy_sigma_distance; otherwise it fails back to dense attention."
     )
 
     def patch(
@@ -44,6 +47,7 @@ class H3ICRFlexSparseAttention:
         policy_json,
         model_id,
         dense_tail_sigma,
+        max_policy_sigma_distance,
         block_size,
         min_block_sparsity,
         local_t_radius,
@@ -53,12 +57,13 @@ class H3ICRFlexSparseAttention:
         force_flex_kernel,
         profile_json="",
     ):
-        patched, runtime = patch_flex_sparse_attention_v2(
+        patched, runtime = patch_flex_sparse_attention_v3(
             model,
             policy_json=policy_json,
             profile_json=profile_json,
             model_id=model_id,
             dense_tail_sigma=dense_tail_sigma,
+            max_policy_sigma_distance=max_policy_sigma_distance,
             block_size=int(block_size),
             min_block_sparsity=min_block_sparsity,
             local_t_radius=local_t_radius,
@@ -67,7 +72,7 @@ class H3ICRFlexSparseAttention:
             temporal_radius=temporal_radius,
             force_flex_kernel=force_flex_kernel,
         )
-        return patched, {"api": 2, "runtime": runtime}
+        return patched, {"api": 3, "runtime": runtime}
 
 
 class H3ICRFlexSparseReport:

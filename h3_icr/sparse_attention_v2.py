@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from typing import Any
 
 import torch
@@ -20,7 +21,6 @@ from .sparse_attention import (
     _get_flex_api,
     _locate_native_h3,
     _make_mask_mod,
-    _proposal_digest,
     parse_and_validate_policy,
 )
 
@@ -76,6 +76,21 @@ def topology_matches_policy(policy: dict[str, Any], branch: str, layout: Any) ->
     if not isinstance(expected, str) or not expected:
         return False
     return topology_digest(layout) == expected
+
+
+def flex_kernel_options(force_flex_kernel: bool) -> dict[str, Any]:
+    options: dict[str, Any] = {"ROWS_GUARANTEED_SAFE": True}
+    if not force_flex_kernel:
+        return options
+    module = importlib.import_module("torch.nn.attention.flex_attention")
+    option_type = getattr(module, "FlexKernelOptions", None)
+    annotations = getattr(option_type, "__annotations__", {}) if option_type is not None else {}
+    if "BACKEND" in annotations:
+        options["BACKEND"] = "TRITON"
+    else:
+        # Compatibility with older PyTorch versions where BACKEND was not yet available.
+        options["FORCE_USE_FLEX_ATTENTION"] = True
+    return options
 
 
 class FlexSparseRuntimeV2(FlexSparseRuntime):
@@ -220,10 +235,13 @@ def _flex_dispatch_v2(
         )
 
     _, flex_attention = _get_flex_api()
-    kernel_options = {"ROWS_GUARANTEED_SAFE": True}
-    if runtime.config.force_flex_kernel:
-        kernel_options["FORCE_USE_FLEX_ATTENTION"] = True
-    out = flex_attention(q, k, v, block_mask=block_mask, kernel_options=kernel_options)
+    out = flex_attention(
+        q,
+        k,
+        v,
+        block_mask=block_mask,
+        kernel_options=flex_kernel_options(runtime.config.force_flex_kernel),
+    )
     runtime.stats.sparse_calls += 1
     if not skip_output_reshape:
         out = out.transpose(1, 2).reshape(q.shape[0], q.shape[-2], heads * q.shape[-1])

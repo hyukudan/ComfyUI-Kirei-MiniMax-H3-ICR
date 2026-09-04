@@ -81,8 +81,16 @@ class TiledRendererStats:
     last_target_w: int = 0
     last_full_video_tokens: int = 0
     last_tile_video_tokens: int = 0
+    last_keyframe_count: int = 0
 
-    def record_plan(self, plan: TilingPlan, *, latent_t: int, spectrum_prior: bool) -> None:
+    def record_plan(
+        self,
+        plan: TilingPlan,
+        *,
+        latent_t: int,
+        spectrum_prior: bool,
+        keyframe_count: int = 0,
+    ) -> None:
         self.calls += 1
         self.tiled_calls += 1
         self.prior_calls += 1
@@ -93,6 +101,7 @@ class TiledRendererStats:
         self.last_target_w = plan.latent_w
         self.last_full_video_tokens = h3_video_token_count(latent_t, plan.latent_h, plan.latent_w)
         self.last_tile_video_tokens = h3_video_token_count(latent_t, plan.tile_h, plan.tile_w)
+        self.last_keyframe_count = int(keyframe_count)
         if spectrum_prior:
             self.spectrum_prior_calls += 1
 
@@ -116,6 +125,7 @@ class TiledRendererStats:
             "last_target_w": self.last_target_w,
             "last_full_video_tokens": self.last_full_video_tokens,
             "last_tile_video_tokens": self.last_tile_video_tokens,
+            "last_keyframe_count": self.last_keyframe_count,
         }
 
 
@@ -179,6 +189,72 @@ def _one_segment(layout: Any, kind: str) -> tuple[int, int]:
     return matches[0]
 
 
+def _video_keyframes(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    return [kf for kf in (payload.get("keyframes") or ()) if kf.get("latent") is not None]
+
+
+def _validate_full_keyframes(payload: dict[str, Any], full_h: int, full_w: int) -> None:
+    for index, keyframe in enumerate(_video_keyframes(payload)):
+        latent = keyframe.get("latent")
+        if not torch.is_tensor(latent) or latent.ndim != 5:
+            raise TypeError(f"minimax_keyframes[{index}] latent must be a 5D H3 video tensor")
+        if latent.shape[0] != 1:
+            raise ValueError("H3 tiled keyframes require batch size one")
+        if tuple(latent.shape[-2:]) != (full_h, full_w):
+            raise ValueError(
+                "M4 tiled keyframes must use the full target latent geometry before tiling; "
+                f"got {tuple(latent.shape[-2:])}, expected {(full_h, full_w)}"
+            )
+
+
+def _rebuild_cond_latents(payload: dict[str, Any]) -> None:
+    keyframes = payload.get("keyframes") or ()
+    refs = payload.get("refs") or ()
+    payload["cond_video_latents"] = [
+        item["latent"] for item in (*keyframes, *refs) if item.get("latent") is not None
+    ]
+    payload["cond_audio_latents"] = [
+        item["audio_latent"] for item in (*keyframes, *refs) if item.get("audio_latent") is not None
+    ]
+
+
+def _payload_with_resized_keyframes(
+    payload: dict[str, Any],
+    target_h: int,
+    target_w: int,
+) -> dict[str, Any]:
+    out = dict(payload)
+    keyframes = []
+    for keyframe in payload.get("keyframes") or ():
+        item = dict(keyframe)
+        latent = item.get("latent")
+        if latent is not None:
+            item["latent"] = _resize_video_spatial(latent, target_h, target_w, "area")
+        keyframes.append(item)
+    out["keyframes"] = keyframes
+    _rebuild_cond_latents(out)
+    out.pop("layout", None)
+    return out
+
+
+def _payload_with_tiled_keyframes(
+    payload: dict[str, Any],
+    tile,
+) -> dict[str, Any]:
+    out = dict(payload)
+    keyframes = []
+    for keyframe in payload.get("keyframes") or ():
+        item = dict(keyframe)
+        latent = item.get("latent")
+        if latent is not None:
+            item["latent"] = latent[..., tile.y0 : tile.y1, tile.x0 : tile.x1]
+        keyframes.append(item)
+    out["keyframes"] = keyframes
+    _rebuild_cond_latents(out)
+    out.pop("layout", None)
+    return out
+
+
 def rewrite_tile_layout_global_positions(
     full_layout: Any,
     tile_layout: Any,
@@ -187,6 +263,7 @@ def rewrite_tile_layout_global_positions(
     full_h: int,
     full_w: int,
     tile,
+    keyframes: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
     patch_h: int = 2,
     patch_w: int = 2,
 ) -> None:
@@ -197,17 +274,38 @@ def rewrite_tile_layout_global_positions(
 
     full_va, full_vb = _one_segment(full_layout, "video")
     tile_va, tile_vb = _one_segment(tile_layout, "video")
+    video_keyframes = [kf for kf in (keyframes or ()) if kf.get("latent") is not None]
+    cond_index = 0
+
     for (fa, fb, kind), (ta, tb, tile_kind) in zip(full_segments, tile_segments):
         if kind != tile_kind:
             raise RuntimeError("H3 tile layout segment order changed unexpectedly")
         if kind == "video":
             continue
-        if (fb - fa) != (tb - ta):
-            raise RuntimeError(
-                "non-video H3 packed segment changed size during spatial tiling; "
-                "target keyframes are not supported by M4-v0"
+        if kind == "cond":
+            if cond_index >= len(video_keyframes):
+                raise RuntimeError("H3 layout exposes more visual keyframe segments than the payload")
+            keyframe_t = int(video_keyframes[cond_index]["latent"].shape[2])
+            selected = select_global_video_positions(
+                full_layout.position_ids[fa:fb],
+                latent_t=keyframe_t,
+                full_h=full_h,
+                full_w=full_w,
+                tile=tile,
+                patch_h=patch_h,
+                patch_w=patch_w,
             )
+            if selected.shape[0] != tb - ta:
+                raise RuntimeError("global MM-RoPE selection does not match tiled keyframe rows")
+            tile_layout.position_ids[ta:tb] = selected
+            cond_index += 1
+            continue
+        if (fb - fa) != (tb - ta):
+            raise RuntimeError(f"non-video H3 packed segment {kind!r} changed size during spatial tiling")
         tile_layout.position_ids[ta:tb] = full_layout.position_ids[fa:fb]
+
+    if cond_index != len(video_keyframes):
+        raise RuntimeError("H3 payload contains visual keyframes that are missing from the packed layout")
 
     selected = select_global_video_positions(
         full_layout.position_ids[full_va:full_vb],
@@ -265,11 +363,6 @@ def tiled_diffusion_model_wrapper(
     video_x, audio_x = x
     if video_x.ndim != 5 or audio_x.ndim != 4 or video_x.shape[0] != 1 or audio_x.shape[0] != 1:
         raise ValueError("H3 tiled renderer expects batch-one native H3 AV tensors")
-    if minimax_payload and minimax_payload.get("keyframes"):
-        raise RuntimeError(
-            "M4-v0 tiled renderer does not yet support target-grid minimax_keyframes; "
-            "use minimax_refs only until keyframe crop/position remapping is implemented"
-        )
 
     inner = executor.class_obj
     module = _native_module(inner)
@@ -297,10 +390,12 @@ def tiled_diffusion_model_wrapper(
         raise RuntimeError(f"H3 tiled plan needs {len(plan.tiles)} tiles, exceeding max_tiles={config.max_tiles}")
 
     payload = dict(minimax_payload or {})
+    _validate_full_keyframes(payload, full_h, full_w)
+    _rebuild_cond_latents(payload)
     full_layout = _resolve_full_layout(module, context, video_x, audio_x, payload)
 
     prior_video_x = _resize_video_spatial(video_x, config.prior_h, config.prior_w, "area")
-    prior_payload = dict(payload)
+    prior_payload = _payload_with_resized_keyframes(payload, config.prior_h, config.prior_w)
     prior_payload["layout"] = _make_layout(
         module,
         context.shape[1],
@@ -332,7 +427,7 @@ def tiled_diffusion_model_wrapper(
     tile_options = _child_options_without_spectrum(options)
     for tile in plan.tiles:
         tile_video_x = video_x[..., tile.y0 : tile.y1, tile.x0 : tile.x1]
-        tile_payload = dict(payload)
+        tile_payload = _payload_with_tiled_keyframes(payload, tile)
         tile_layout = _make_layout(
             module,
             context.shape[1],
@@ -349,6 +444,7 @@ def tiled_diffusion_model_wrapper(
             full_h=full_h,
             full_w=full_w,
             tile=tile,
+            keyframes=payload.get("keyframes"),
             patch_h=patch_h,
             patch_w=patch_w,
         )
@@ -374,7 +470,12 @@ def tiled_diffusion_model_wrapper(
 
     fused_video = accumulator.finalize(prior=prior_hr, prior_strength=config.prior_strength)
     spectrum_prior = any(key.startswith(SPECTRUM_PREFIX) for key in options)
-    stats.record_plan(plan, latent_t=int(video_x.shape[2]), spectrum_prior=spectrum_prior)
+    stats.record_plan(
+        plan,
+        latent_t=int(video_x.shape[2]),
+        spectrum_prior=spectrum_prior,
+        keyframe_count=len(_video_keyframes(payload)),
+    )
     return [fused_video.to(video_x.dtype), prior_audio_out]
 
 

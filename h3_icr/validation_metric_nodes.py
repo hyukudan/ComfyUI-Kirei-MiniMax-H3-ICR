@@ -5,6 +5,7 @@ import json
 from .validation import parse_json_object
 from .validation_metrics import (
     build_validation_result_bundle,
+    compare_validation_result_bundles,
     evaluate_latent_output,
 )
 
@@ -82,12 +83,56 @@ class H3ICRValidationResultBundle:
         return bundle, rendered, str(bundle["bundle_id"])
 
 
+class H3ICRCompareValidationBundles:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "bundle_a": ("H3_ICR_VALIDATION_BUNDLE",),
+                "bundle_b": ("H3_ICR_VALIDATION_BUNDLE",),
+                "allowed_differences": (
+                    "STRING",
+                    {"multiline": True, "default": "arm.settings"},
+                ),
+                "fail_on_unexpected_difference": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("BOOLEAN", "STRING")
+    RETURN_NAMES = ("comparable", "comparison_json")
+    FUNCTION = "compare"
+    OUTPUT_NODE = True
+    CATEGORY = "Kirei/MiniMax H3/ICR/Validation"
+    DESCRIPTION = (
+        "Compare two complete validation bundles. Their manifests must satisfy the same strict A/B rules before metric "
+        "deltas are interpreted. Shared scalar latent metrics are reported as B-A deltas with conservative direction "
+        "hints; no automatic global winner is assigned."
+    )
+
+    def compare(self, bundle_a, bundle_b, allowed_differences, fail_on_unexpected_difference):
+        report = compare_validation_result_bundles(
+            bundle_a,
+            bundle_b,
+            allowed_differences=allowed_differences,
+        )
+        if fail_on_unexpected_difference and not report["comparable"]:
+            unexpected = report.get("manifest_comparison", {}).get("unexpected_differences", [])
+            paths = [row.get("path", "?") for row in unexpected]
+            preview = ", ".join(paths[:12])
+            if len(paths) > 12:
+                preview += f", ... (+{len(paths) - 12})"
+            raise ValueError(f"H3-ICR bundle comparison is not controlled: {preview}")
+        return bool(report["comparable"]), json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2)
+
+
 NODE_CLASS_MAPPINGS = {
     "H3ICRLatentValidationMetrics": H3ICRLatentValidationMetrics,
     "H3ICRValidationResultBundle": H3ICRValidationResultBundle,
+    "H3ICRCompareValidationBundles": H3ICRCompareValidationBundles,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3ICRLatentValidationMetrics": "Kirei H3 ICR Latent Validation Metrics",
     "H3ICRValidationResultBundle": "Kirei H3 ICR Validation Result Bundle",
+    "H3ICRCompareValidationBundles": "Kirei H3 ICR Compare Validation Bundles",
 }

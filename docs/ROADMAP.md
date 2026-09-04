@@ -32,8 +32,8 @@
 
 Remaining before acceptance:
 
-- live ComfyUI validation with the target samplers/backends;
-- verify interaction with M4 and the optional M3 measurement constraints;
+- live ComfyUI validation with target samplers/backends;
+- interaction tests with M4 and the optional M3 measurement constraints;
 - confirm that late detail is not suppressed.
 
 ## M3b — normalized latent measurement backprojection — implemented experimentally
@@ -90,7 +90,7 @@ Remaining before acceptance:
 - conservative latent RMS correction cap;
 - optional second decode for measured post-correction RMSE;
 - AV-container and packed-H3 support;
-- audio is never part of the decoder gradient and is copied unchanged;
+- audio is copied unchanged;
 - dedicated nodes, telemetry, documentation and CPU contract tests.
 
 Initial laboratory values:
@@ -115,7 +115,7 @@ Remaining before acceptance:
 - test 256/384 measurement size and frame stride 1/2/4;
 - determine whether edge or temporal terms materially improve decoded media;
 - test full VisualVAE backward only if operationally feasible;
-- reject M3d if proxy loss improves without a visible fidelity/detail benefit.
+- reject M3d if proxy loss improves without visible fidelity/detail benefit.
 
 ## M4 — 2K renderer — experimental implementation in PR #1
 
@@ -175,7 +175,7 @@ Remaining before acceptance:
 - mandatory dense sigma tail;
 - dense fallback on non-CUDA, external masks, incomplete/dense policies or low measured block sparsity;
 - topology/layer/policy/device BlockMask cache;
-- modern PyTorch `BACKEND="TRITON"` selection with legacy compatibility;
+- modern PyTorch Triton Flex backend with legacy compatibility;
 - telemetry for sparse calls, fallbacks, mask builds/cache hits and block sparsity.
 
 Remaining before acceptance:
@@ -207,29 +207,60 @@ Remaining before acceptance:
 - measure fallback frequency at tolerance 0.03;
 - prefer v3 only if it improves parity or the speed/quality operating point.
 
-## M6 — state-aware BaseVideo Adapter + detail LoRA — next engineering stage
+## M6a — state-aware BaseVideo Adapter runtime scaffold — implemented
 
-Planned contract:
+Implemented:
 
-- H3 backbone frozen initially;
-- **static stream:** clean Base/draft video features;
-- **dynamic stream:** current predicted-clean / denoising state;
-- optional sparse HR-keyframe stream;
-- sigma-conditioned structure-to-detail gating;
-- zero-initialized residual injection so an untrained adapter is exact backbone parity;
-- selected H3 blocks first, wider injection only after evidence;
-- explicit adapter checkpoint/provider ABI;
-- incompatible or missing adapter weights fail closed;
-- training data includes real H3 Base rollouts and AIGC-oriented degradations, not only bicubic camera video;
-- training losses may include flow/teacher objective, latent measurement consistency, temporal consistency and high-frequency wavelet/HOG terms.
+- frozen-H3-compatible residual adapter module;
+- **static stream:** aligned clean Base latent patch rows;
+- **dynamic stream:** current native H3 target-video hidden rows;
+- sigma-conditioned static/dynamic structure-to-detail gating;
+- linear-cost local 3D depthwise + pointwise feature mixer;
+- exactly zero-initialized output projection;
+- `trained=false` provider is bypassed before adapter compute;
+- default plumbing blocks `12,24,36,45,48` with no optimality claim;
+- native H3 architecture descriptor + SHA-256 binding;
+- existing `double_block` patch-chain composition;
+- static Base caches by geometry/device/dtype;
+- exact M4 tile Base-region reconstruction from the tile's existing full-canvas MM-RoPE `position_ids`;
+- ambiguous/non-native tile geometry fails closed;
+- nodes and telemetry;
+- exact zero-init parity and M4 tile-region unit tests.
 
-M6 acceptance requires:
+## M6b — trained adapter checkpoint ABI + ComfyUI offload loader — implemented
 
-- zero-init/no-weight parity contract;
-- reproducible checkpoint metadata and architecture binding;
-- improved decoded-media detail/fidelity over the best training-free teacher;
-- no identity/object/action regressions;
-- measured additional VRAM and wall-time cost.
+Implemented:
+
+- safetensors-only loader under `models/kirei_h3_adapters`;
+- metadata API v1;
+- checkpoint kind / model_id / architecture digest validation;
+- exact adapter config validation;
+- sorted/unique/in-range injection-block validation;
+- strict state-dict key matching;
+- NaN/Inf tensor rejection;
+- complete checkpoint file SHA-256 provenance;
+- active H3 dtype binding;
+- adapter wrapped in ComfyUI `CoreModelPatcher` using normal load/offload devices;
+- managed provider registration through `MODEL.set_additional_models`;
+- loader/application/report nodes;
+- metadata, strict-state, architecture mismatch and additional-model registration tests.
+
+No trained checkpoint is shipped and no M6 quality gain is claimed.
+
+Remaining before trained M6 acceptance:
+
+- create/train first adapter checkpoint against the selected training-free teacher;
+- real ComfyUI additional-model lifecycle/offload validation on CUDA;
+- dense ~1 MP decoded-media comparison against the teacher;
+- M4 2K decoded-media validation of MM-RoPE-derived Base tile crops;
+- ablate injection blocks, adapter width, local kernels and gate schedule;
+- measure adapter VRAM/wall-time overhead;
+- verify identity/object/action/timing parity and temporal stability;
+- add optional verified HR-keyframe stream only after Base+dynamic adapter behavior is measured.
+
+## M6c — optional detail LoRA — planned
+
+Only consider after the BaseVideo Adapter is trained and evaluated. Add a detail LoRA if a repeatable high-frequency gap remains that the adapter alone cannot close without harming fidelity.
 
 ## M7 — distillation
 

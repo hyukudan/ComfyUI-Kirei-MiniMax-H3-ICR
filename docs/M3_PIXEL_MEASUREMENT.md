@@ -1,10 +1,10 @@
-# M3c — Proxy-Decoder Pixel Measurement Consistency
+# M3d — Proxy-Decoder Pixel Measurement Consistency
 
 Status: experimental, off by default, awaiting real H3 media validation.
 
 ## Purpose
 
-M3c tests whether an HR predicted-clean H3 latent still reproduces the Base video in **decoded pixel space**, while avoiding a differentiable 2K VisualVAE decode.
+M3d tests whether an HR predicted-clean H3 latent still reproduces the Base video in **decoded pixel space**, while avoiding a differentiable 2K VisualVAE decode.
 
 The measurement path is:
 
@@ -22,7 +22,7 @@ This is a pixel-space measurement experiment. It is **not claimed to be an exact
 
 ## Why the decoder runs at Base latent geometry
 
-A differentiable full-resolution H3 VisualVAE decode at every selected denoising call would be extremely expensive. M3c therefore first applies the known latent measurement operator:
+A differentiable full-resolution H3 VisualVAE decode at every selected denoising call would be extremely expensive. M3d therefore first applies the known latent measurement operator:
 
 ```text
 z_probe = D_latent(x0_HR)
@@ -58,38 +58,32 @@ Spatial reduction and temporal subsampling reduce retained reference memory and 
 
 ## Loss
 
-The current experimental loss is:
-
 ```text
 L = L_pixel
   + edge_weight * L_spatial_edge
   + temporal_weight * L_temporal_difference
 ```
 
-where:
+- `L_pixel`: RGB MSE;
+- `L_spatial_edge`: first-difference error in X/Y;
+- `L_temporal_difference`: adjacent measured-frame difference error.
 
-- `L_pixel` is RGB MSE;
-- `L_spatial_edge` compares first spatial differences in X and Y;
-- `L_temporal_difference` compares adjacent measured-frame differences.
-
-Default research weights:
+Initial weights:
 
 ```text
 edge_weight:     0.25
 temporal_weight: 0.10
 ```
 
-These weights are hypotheses, not tuned values.
-
 ## Gradient normalization and safety cap
 
-Let `g = dL / d(x0_HR)`. The correction uses pixel RMSE to normalize the gradient scale:
+Let `g = dL / d(x0_HR)`:
 
 ```text
 correction = -strength * g * pixel_RMSE / RMS(g)
 ```
 
-The resulting correction is then bounded relative to the HR/Base latent RMS scale.
+The correction is then bounded relative to the HR/Base latent RMS scale.
 
 Initial settings:
 
@@ -100,29 +94,27 @@ max_correction_rms_ratio: 0.02
 verify_after:             false
 ```
 
-`verify_after=true` performs a second proxy decode after the correction to measure the actual pixel-RMSE change. It is intentionally disabled by default because it doubles decoder calls on applied hooks.
+`verify_after=true` performs a second proxy decode after correction to measure actual pixel-RMSE change. It is off by default because it doubles decoder calls on applied hooks.
 
 ## Audio invariant
 
-M3c only modifies the predicted-clean **video** latent. H3 audio is copied through unchanged in both NestedTensor/AV-container and packed-AV paths.
+M3d changes only the predicted-clean video latent. H3 audio is copied through unchanged in NestedTensor/AV-container and packed-AV paths.
 
-## Relationship to M3a/M3b
-
-The three constraints answer different questions:
+## Relationship to the other M3 constraints
 
 ### M3a — low-frequency latent fidelity
+Protects broad structure and motion while leaving high frequencies free.
 
-Protects broad structure and motion while deliberately leaving high frequencies free.
+### M3b — normalized latent measurement backprojection
+Constrains `D_latent(x0_HR)` toward the clean Base latent without autograd.
 
-### M3b — explicit latent measurement consistency
+### M3c — latent posterior gradient
+Uses autograd only through the latent area-downsample measurement operator.
 
-Constrains `D_latent(x0_HR)` directly toward the clean H3 Base latent using a normalized backprojection.
+### M3d — proxy-decoder pixel measurement
+Constrains decoded appearance, spatial edges and temporal differences of `D_latent(x0_HR)` in a selected H3 decoder domain.
 
-### M3c — proxy-decoder pixel measurement
-
-Constrains the **decoded appearance and temporal differences** of `D_latent(x0_HR)` toward the Base video in the selected decoder domain.
-
-Do not enable all three by default. Their overlap must be measured in controlled ablations.
+Do not enable all constraints by default. Their overlap must be measured in controlled ablations.
 
 ## Recommended validation matrix
 
@@ -131,10 +123,11 @@ Keep backend, Base latent, references, target noise, sigmas and sampler identica
 1. M3a only;
 2. M3a + M3b;
 3. M3a + M3c;
-4. M3a + M3b + M3c;
-5. all measurement constraints off.
+4. M3a + M3d;
+5. selected combinations only after each individual arm is characterized;
+6. all measurement constraints off.
 
-For M3c also compare:
+For M3d also compare:
 
 - `taeh3` proxy versus full VisualVAE only if full-VAE backward is operational;
 - `apply_every` 2 / 4 / 8;

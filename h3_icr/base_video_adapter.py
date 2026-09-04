@@ -64,6 +64,108 @@ def h3_architecture_digest(inner: Any, model_id: str = "") -> str:
     return _digest(h3_architecture_descriptor(inner, model_id))
 
 
+def _video_segment(layout: Any) -> tuple[int, int]:
+    matches = [(int(a), int(b)) for a, b, kind in getattr(layout, "segments", ()) if kind == "video"]
+    if len(matches) != 1:
+        raise RuntimeError("BaseVideo Adapter expected one native H3 target-video segment")
+    return matches[0]
+
+
+def _h3_axis_coordinates(dim: int, other_dim: int, patch: int) -> torch.Tensor:
+    if dim <= 0 or other_dim <= 0 or patch <= 0 or dim % patch:
+        raise ValueError("invalid H3 axis geometry")
+    area = math.sqrt(dim * other_dim)
+    ratio = dim / area
+    n = dim // patch
+    return (torch.arange(n, dtype=torch.float64) * (ratio / n) + (1.0 - ratio) / 2.0) * 32.0
+
+
+def _find_axis_subsequence(full_axis: torch.Tensor, sub_axis: torch.Tensor) -> int | None:
+    if sub_axis.numel() > full_axis.numel():
+        return None
+    for start in range(int(full_axis.numel() - sub_axis.numel()) + 1):
+        candidate = full_axis[start : start + sub_axis.numel()]
+        if torch.allclose(candidate, sub_axis.cpu(), atol=1e-8, rtol=1e-8):
+            return start
+    return None
+
+
+def infer_m4_tile_region_from_global_positions(
+    layout: Any,
+    *,
+    latent_t: int,
+    tile_h: int,
+    tile_w: int,
+    patch_size: tuple[int, int, int] = (1, 2, 2),
+) -> tuple[int, int, int, int, int, int]:
+    """Infer full latent geometry and tile bounds from M4 global MM-RoPE rows.
+
+    Returns `(full_h, full_w, y0, y1, x0, x1)` in latent units. M4 rewrites
+    target-video position_ids by selecting exact rows from the full-canvas H3
+    layout, so the tile axis values are a contiguous subsequence of the native
+    full axis coordinates.
+    """
+    positions = getattr(layout, "position_ids", None)
+    if not torch.is_tensor(positions) or positions.ndim != 2 or positions.shape[1] != 3:
+        raise RuntimeError("M6 tile alignment requires native H3 layout.position_ids [rows,3]")
+    pt, ph, pw = (int(v) for v in patch_size)
+    if latent_t % pt or tile_h % ph or tile_w % pw:
+        raise ValueError("M6 tile geometry is not aligned to native H3 patch_size")
+    va, vb = _video_segment(layout)
+    grid_t, grid_h, grid_w = latent_t // pt, tile_h // ph, tile_w // pw
+    frame_rows = grid_h * grid_w
+    if vb - va != grid_t * frame_rows:
+        raise RuntimeError("M6 tile video rows do not match the active H3 patch grid")
+    first = positions[va : va + frame_rows].detach().to(device="cpu", dtype=torch.float64)
+    first = first.reshape(grid_h, grid_w, 3)
+    h_axis = first[:, 0, 1]
+    w_axis = first[0, :, 2]
+
+    area_estimates: list[float] = []
+    if h_axis.numel() > 1:
+        step_h = float((h_axis[1:] - h_axis[:-1]).abs().median().item())
+        if step_h > 0:
+            area_estimates.append(32.0 * ph / step_h)
+    if w_axis.numel() > 1:
+        step_w = float((w_axis[1:] - w_axis[:-1]).abs().median().item())
+        if step_w > 0:
+            area_estimates.append(32.0 * pw / step_w)
+    if not area_estimates:
+        raise RuntimeError("M6 cannot infer full M4 canvas from a one-patch tile")
+    area = sum(area_estimates) / len(area_estimates)
+    if any(abs(value - area) > max(1e-6, area * 1e-6) for value in area_estimates):
+        raise RuntimeError("M6 tile MM-RoPE spatial step is inconsistent across axes")
+    pixel_product = int(round(area * area))
+    if pixel_product <= 0:
+        raise RuntimeError("M6 inferred an invalid full-canvas latent area")
+
+    candidates: set[tuple[int, int, int, int, int, int]] = set()
+    limit = int(math.isqrt(pixel_product))
+    for divisor in range(1, limit + 1):
+        if pixel_product % divisor:
+            continue
+        pairs = ((divisor, pixel_product // divisor),)
+        if divisor != pixel_product // divisor:
+            pairs += ((pixel_product // divisor, divisor),)
+        for full_h, full_w in pairs:
+            if full_h < tile_h or full_w < tile_w or full_h % ph or full_w % pw:
+                continue
+            full_h_axis = _h3_axis_coordinates(full_h, full_w, ph)
+            full_w_axis = _h3_axis_coordinates(full_w, full_h, pw)
+            y_patch = _find_axis_subsequence(full_h_axis, h_axis)
+            x_patch = _find_axis_subsequence(full_w_axis, w_axis)
+            if y_patch is None or x_patch is None:
+                continue
+            y0, x0 = y_patch * ph, x_patch * pw
+            candidates.add((full_h, full_w, y0, y0 + tile_h, x0, x0 + tile_w))
+
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"M6 expected one full-canvas solution from tile MM-RoPE, discovered {len(candidates)}"
+        )
+    return next(iter(candidates))
+
+
 @dataclass(frozen=True, slots=True)
 class BaseVideoAdapterConfig:
     injection_blocks: tuple[int, ...]
@@ -99,13 +201,7 @@ class BaseVideoAdapterConfig:
 
 
 class StateAwareBaseVideoAdapter(nn.Module):
-    """Linear-cost local adapter over aligned Base and current H3 target rows.
-
-    The final projection is zero-initialized. Therefore a newly-created module
-    is an exact no-op even though the internal static/dynamic paths have normal
-    initialization. A trained checkpoint is expected to learn the residual
-    projection and the local feature mixer.
-    """
+    """Linear-cost local adapter over aligned Base and current H3 target rows."""
 
     def __init__(
         self,
@@ -207,7 +303,8 @@ class BaseVideoAdapterStats:
     block_calls: int = 0
     applied_blocks: int = 0
     zero_init_bypass_blocks: int = 0
-    m4_tile_fallback_blocks: int = 0
+    m4_tile_aligned_blocks: int = 0
+    tile_region_inferences: int = 0
     static_cache_hits: int = 0
     static_cache_builds: int = 0
     device_moves: int = 0
@@ -221,7 +318,8 @@ class BaseVideoAdapterStats:
             "block_calls": self.block_calls,
             "applied_blocks": self.applied_blocks,
             "zero_init_bypass_blocks": self.zero_init_bypass_blocks,
-            "m4_tile_fallback_blocks": self.m4_tile_fallback_blocks,
+            "m4_tile_aligned_blocks": self.m4_tile_aligned_blocks,
+            "tile_region_inferences": self.tile_region_inferences,
             "static_cache_hits": self.static_cache_hits,
             "static_cache_builds": self.static_cache_builds,
             "device_moves": self.device_moves,
@@ -238,6 +336,7 @@ class _ActiveAdapterCall:
     latent_h: int
     latent_w: int
     branch: str
+    tile_region: tuple[int, int, int, int, int, int] | None = None
 
 
 class BaseVideoAdapterRuntime:
@@ -260,6 +359,7 @@ class BaseVideoAdapterRuntime:
         self.stats = BaseVideoAdapterStats()
         self._active: _ActiveAdapterCall | None = None
         self._static_cache: dict[tuple[Any, ...], torch.Tensor] = {}
+        self._resized_base_cache: dict[tuple[Any, ...], torch.Tensor] = {}
 
     def begin_call(self, video_x: torch.Tensor, timestep: torch.Tensor, options: dict[str, Any]) -> None:
         if self._active is not None:
@@ -296,6 +396,7 @@ class BaseVideoAdapterRuntime:
 
     def clear_cache(self) -> None:
         self._static_cache.clear()
+        self._resized_base_cache.clear()
 
     def to(self, device_or_dtype: Any):
         self.provider.module.to(device_or_dtype)
@@ -329,32 +430,53 @@ class BaseVideoAdapterRuntime:
         rows = torch.einsum("nctrhpwq->nthwcrpq", rows)
         return rows.reshape(b * t * h * w, c * pt * ph * pw)
 
-    def _static_rows(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
+    def _resized_base(self, full_h: int, full_w: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        key = (full_h, full_w, str(device), str(dtype))
+        cached = self._resized_base_cache.get(key)
+        if cached is not None:
+            return cached
+        base = self.base_video.to(device=device, dtype=dtype)
+        resized = self._resize_spatial(base, full_h, full_w)
+        self._resized_base_cache[key] = resized
+        return resized
+
+    def _static_rows(self, layout: Any, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         active = self._active
         if active is None:
             raise RuntimeError("BaseVideo Adapter has no active H3 call")
-        if active.branch == "m4_hr_tile":
-            return None
         if int(self.base_video.shape[2]) != active.latent_t:
             raise ValueError("BaseVideo Adapter Base/target temporal latent length differs")
-        key = (active.latent_t, active.latent_h, active.latent_w, str(device), str(dtype))
+
+        region = None
+        full_h, full_w = active.latent_h, active.latent_w
+        if active.branch == "m4_hr_tile":
+            if active.tile_region is None:
+                active.tile_region = infer_m4_tile_region_from_global_positions(
+                    layout,
+                    latent_t=active.latent_t,
+                    tile_h=active.latent_h,
+                    tile_w=active.latent_w,
+                    patch_size=self.provider.module.patch_size,
+                )
+                self.stats.tile_region_inferences += 1
+            full_h, full_w, y0, y1, x0, x1 = active.tile_region
+            region = (y0, y1, x0, x1)
+
+        key = (full_h, full_w, region, str(device), str(dtype))
         cached = self._static_cache.get(key)
         if cached is not None:
             self.stats.static_cache_hits += 1
             return cached
-        base = self.base_video.to(device=device, dtype=dtype)
-        resized = self._resize_spatial(base, active.latent_h, active.latent_w)
+        resized = self._resized_base(full_h, full_w, device, dtype)
+        if region is not None:
+            y0, y1, x0, x1 = region
+            resized = resized[..., y0:y1, x0:x1]
+        if resized.shape[-2:] != (active.latent_h, active.latent_w):
+            raise RuntimeError("M6 aligned Base crop does not match the active H3 target/tile geometry")
         rows = self._patchify(resized, self.provider.module.patch_size)
         self._static_cache[key] = rows
         self.stats.static_cache_builds += 1
         return rows
-
-    @staticmethod
-    def _video_segment(layout: Any) -> tuple[int, int]:
-        matches = [(int(a), int(b)) for a, b, kind in getattr(layout, "segments", ()) if kind == "video"]
-        if len(matches) != 1:
-            raise RuntimeError("BaseVideo Adapter expected one native H3 target-video segment")
-        return matches[0]
 
     def after_block(self, block_index: int, args: dict[str, Any], out: dict[str, Any]) -> dict[str, Any]:
         self.stats.block_calls += 1
@@ -364,20 +486,14 @@ class BaseVideoAdapterRuntime:
         active = self._active
         if active is None:
             raise RuntimeError("BaseVideo Adapter block executed outside an active H3 model call")
-        if active.branch == "m4_hr_tile":
-            self.stats.m4_tile_fallback_blocks += 1
-            return out
         img = out.get("img")
         layout = args.get("layout")
         if not torch.is_tensor(img) or img.ndim != 2 or layout is None:
             raise RuntimeError("BaseVideo Adapter received an incompatible native H3 block contract")
-        va, vb = self._video_segment(layout)
+        va, vb = _video_segment(layout)
         dynamic = img[va:vb]
         self._ensure_module_device(dynamic.device, dynamic.dtype)
-        static_rows = self._static_rows(dynamic.device, dynamic.dtype)
-        if static_rows is None:
-            self.stats.m4_tile_fallback_blocks += 1
-            return out
+        static_rows = self._static_rows(layout, dynamic.device, dynamic.dtype)
         pt, ph, pw = self.provider.module.patch_size
         grid_t = active.latent_t // pt
         grid_h = active.latent_h // ph
@@ -397,6 +513,8 @@ class BaseVideoAdapterRuntime:
         residual = residual * self.strength
         rms = float(residual.float().square().mean().sqrt().item())
         self.stats.applied_blocks += 1
+        if active.branch == "m4_hr_tile":
+            self.stats.m4_tile_aligned_blocks += 1
         self.stats.residual_rms_sum += rms
         self.stats.residual_rms_max = max(self.stats.residual_rms_max, rms)
         if rms != 0.0:
@@ -408,7 +526,7 @@ class BaseVideoAdapterRuntime:
             "api": ADAPTER_API,
             "provider": self.provider.to_dict(),
             "strength": self.strength,
-            "m4_hr_tile_support": False,
+            "m4_hr_tile_support": "global_mmrope_inferred",
             "stats": self.stats.to_dict(),
         }
 

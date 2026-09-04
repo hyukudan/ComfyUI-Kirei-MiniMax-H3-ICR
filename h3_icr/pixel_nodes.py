@@ -34,7 +34,7 @@ class H3ICRPixelMeasurementConsistency:
     FUNCTION = "patch"
     CATEGORY = "Kirei/MiniMax H3/ICR/Research"
     DESCRIPTION = (
-        "Experimental M3c pixel-space measurement constraint. It downsamples the HR predicted-clean latent "
+        "Experimental M3d pixel-space measurement constraint. It downsamples the HR predicted-clean latent "
         "to Base latent geometry, decodes that LR probe with an H3-compatible 24-channel VAE/TAE, and "
         "backpropagates pixel/edge/temporal measurement error into the HR latent. A lightweight taeh3 proxy "
         "is recommended; full VisualVAE gradients are opt-in because they can be very expensive. Audio is untouched."
@@ -111,6 +111,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "H3ICRPixelMeasurementConsistency": "Kirei H3 ICR Pixel Measurement [M3c Experimental]",
+    "H3ICRPixelMeasurementConsistency": "Kirei H3 ICR Pixel Measurement [M3d Experimental]",
     "H3ICRPixelMeasurementReport": "Kirei H3 ICR Pixel Measurement Report",
 }

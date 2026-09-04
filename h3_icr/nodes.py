@@ -4,9 +4,11 @@ from .backend import BACKENDS, BackendDescriptor, descriptor_from_model, tag_mod
 from .contracts import unwrap_av
 from .fidelity import FidelityConfig
 from .initializer import InitConfig, upscale_and_align_clean
+from .measurement import MeasurementConsistencyConfig
 from .metrics import ICRMetrics
 from .reference import append_base_latent_reference
 from .runtime_fidelity import patch_per_step_fidelity
+from .runtime_measurement import patch_measurement_consistency
 from .sampling import mark_second_pass, run_second_pass, validate_partial_sigmas
 
 
@@ -127,6 +129,58 @@ class H3ICRPrepareClean:
         return out, report
 
 
+class H3ICRMeasurementConsistencyConfig:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "strength": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "cutoff": ("FLOAT", {"default": 0.35, "min": 0.02, "max": 1.0, "step": 0.01}),
+                "high_band_mix": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "max_correction_rms_ratio": ("FLOAT", {"default": 0.15, "min": 0.01, "max": 2.0, "step": 0.01}),
+                "robust_delta": ("FLOAT", {"default": 3.0, "min": 0.0, "max": 20.0, "step": 0.1}),
+                "max_backprojection_gain": ("FLOAT", {"default": 2.0, "min": 0.05, "max": 8.0, "step": 0.05}),
+                "iterations": ("INT", {"default": 1, "min": 1, "max": 8, "step": 1}),
+                "schedule_power": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.05}),
+                "schedule_floor": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+            }
+        }
+
+    RETURN_TYPES = ("H3_ICR_MEASUREMENT",)
+    RETURN_NAMES = ("measurement_consistency",)
+    FUNCTION = "build"
+    CATEGORY = "Kirei/MiniMax H3/ICR/Research"
+    DESCRIPTION = (
+        "Optional latent measurement-consistency constraint for pass 2. It measures D(x0_HR) against the "
+        "clean H3 Base latent, performs normalized bounded backprojection of the residual, and never edits audio."
+    )
+
+    def build(
+        self,
+        strength,
+        cutoff,
+        high_band_mix,
+        max_correction_rms_ratio,
+        robust_delta,
+        max_backprojection_gain,
+        iterations,
+        schedule_power,
+        schedule_floor,
+    ):
+        config = MeasurementConsistencyConfig(
+            strength=float(strength),
+            cutoff=float(cutoff),
+            high_band_mix=float(high_band_mix),
+            max_correction_rms_ratio=float(max_correction_rms_ratio),
+            robust_delta=float(robust_delta),
+            max_backprojection_gain=float(max_backprojection_gain),
+            iterations=int(iterations),
+            schedule_power=float(schedule_power),
+            schedule_floor=float(schedule_floor),
+        )
+        return ({"api": 1, "config": config},)
+
+
 class H3ICRRegenerate:
     @classmethod
     def INPUT_TYPES(cls):
@@ -154,6 +208,7 @@ class H3ICRRegenerate:
                 "negative": ("CONDITIONING",),
                 "learned_upscaler": ("H3_LATENT_UPSCALER",),
                 "backend": ("H3_ICR_BACKEND",),
+                "measurement_consistency": ("H3_ICR_MEASUREMENT",),
             },
         }
 
@@ -188,6 +243,7 @@ class H3ICRRegenerate:
         negative=None,
         learned_upscaler=None,
         backend=None,
+        measurement_consistency=None,
     ):
         metrics = ICRMetrics()
         sigma_start = validate_partial_sigmas(sigmas)
@@ -209,6 +265,7 @@ class H3ICRRegenerate:
         metrics.event("initialization", **init_report)
         prepared_model = mark_second_pass(model)
         source_video, _ = unwrap_av(base_latent["samples"])
+
         fidelity_stats = None
         if per_step_fidelity_strength > 0.0:
             prepared_model, fidelity_stats = patch_per_step_fidelity(
@@ -227,6 +284,33 @@ class H3ICRRegenerate:
                 power=float(per_step_fidelity_power),
                 floor=float(per_step_fidelity_floor),
             )
+
+        measurement_stats = None
+        if measurement_consistency is not None:
+            if not isinstance(measurement_consistency, dict) or int(measurement_consistency.get("api", -1)) != 1:
+                raise TypeError("measurement_consistency must be a Kirei H3 ICR measurement config")
+            measurement_config = measurement_consistency.get("config")
+            if not isinstance(measurement_config, MeasurementConsistencyConfig):
+                raise TypeError("measurement_consistency contains an invalid config")
+            prepared_model, measurement_stats = patch_measurement_consistency(
+                prepared_model,
+                source_video,
+                sigma_start=sigma_start,
+                config=measurement_config,
+            )
+            metrics.event(
+                "measurement_consistency_config",
+                strength=measurement_config.strength,
+                cutoff=measurement_config.cutoff,
+                high_band_mix=measurement_config.high_band_mix,
+                max_correction_rms_ratio=measurement_config.max_correction_rms_ratio,
+                robust_delta=measurement_config.robust_delta,
+                max_backprojection_gain=measurement_config.max_backprojection_gain,
+                iterations=measurement_config.iterations,
+                schedule_power=measurement_config.schedule_power,
+                schedule_floor=measurement_config.schedule_floor,
+            )
+
         out = run_second_pass(
             clean,
             model=prepared_model,
@@ -240,6 +324,8 @@ class H3ICRRegenerate:
         )
         if fidelity_stats is not None:
             metrics.event("per_step_fidelity_result", **fidelity_stats.to_dict())
+        if measurement_stats is not None:
+            metrics.event("measurement_consistency_result", **measurement_stats.to_dict())
         metrics.event("complete", lock_audio=bool(lock_audio))
         return out, metrics.to_dict()
 
@@ -265,6 +351,7 @@ NODE_CLASS_MAPPINGS = {
     "H3ICRBackendTag": H3ICRBackendTag,
     "H3ICRAppendBaseLatentReference": H3ICRAppendBaseLatentReference,
     "H3ICRPrepareClean": H3ICRPrepareClean,
+    "H3ICRMeasurementConsistencyConfig": H3ICRMeasurementConsistencyConfig,
     "H3ICRRegenerate": H3ICRRegenerate,
     "H3ICRReportJSON": H3ICRReportJSON,
 }
@@ -273,6 +360,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "H3ICRBackendTag": "Kirei H3 ICR Backend Tag",
     "H3ICRAppendBaseLatentReference": "Kirei H3 ICR Append Base Latent Reference",
     "H3ICRPrepareClean": "Kirei H3 ICR Prepare Clean HR",
+    "H3ICRMeasurementConsistencyConfig": "Kirei H3 ICR Measurement Consistency [Experimental]",
     "H3ICRRegenerate": "Kirei H3 ICR Regenerate",
     "H3ICRReportJSON": "Kirei H3 ICR Report JSON",
 }
